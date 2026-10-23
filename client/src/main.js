@@ -200,6 +200,7 @@ foodInstancedMesh.instanceColor = new THREE.InstancedBufferAttribute(
 );
 foodInstancedMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
 foodInstancedMesh.count = 0;
+foodInstancedMesh.frustumCulled = false;
 scene.add(foodInstancedMesh);
 
 // Retained for backward-compat with the dev handle; tracks nothing visual now.
