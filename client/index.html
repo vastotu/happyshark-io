@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Empty icon until we have real art; avoids a favicon 404 in the console. -->
+    <link rel="icon" href="data:," />
+    <title>HappyShark.io</title>
+    <style>
+      :root {
+        --water: #081426;
+        --ink: #e8f1ff;
+        --accent: #3fa9f5;
+        --gold: #ffd166;
+        --panel: rgba(5, 16, 36, 0.62);
+        --ui-font: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: var(--water);
+        font-family: var(--ui-font);
+      }
+
+      /* WebGL surface. block removes the inline-element baseline gap. */
+      #game {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      /* Every overlay layer sits above the canvas and ignores the mouse, so
+         aiming still reaches the window listener underneath. */
+      .overlay {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+      }
+
+      #nameplates span {
+        position: absolute;
+        transform: translate(-50%, -100%);
+        white-space: nowrap;
+        font-size: 13px;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.95);
+        text-shadow:
+          0 0 3px rgba(4, 12, 26, 0.95),
+          0 1px 2px rgba(4, 12, 26, 0.9);
+      }
+
+      #leaderboard,
+      #stats {
+        position: fixed;
+        right: 16px;
+        padding: 12px 14px;
+        border-radius: 9px;
+        background: var(--panel);
+        color: rgba(232, 241, 255, 0.92);
+        font-size: 13px;
+        line-height: 21px;
+        backdrop-filter: blur(2px);
+      }
+
+      #leaderboard {
+        top: 16px;
+        width: 196px;
+      }
+
+      #stats {
+        bottom: 16px;
+        min-width: 126px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      #leaderboard h2 {
+        margin: 0 0 4px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+        color: rgba(232, 241, 255, 0.6);
+      }
+
+      #leaderboard ol {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      #leaderboard li {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      #leaderboard li.self {
+        color: var(--gold);
+      }
+
+      #leaderboard li span:first-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* Death cinematic: an HTML curtain over the live WebGL scene. */
+      #gameover {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        pointer-events: none;
+        background: rgba(0, 0, 0, 0);
+        text-align: center;
+        color: #fff;
+      }
+
+      #gameover[hidden] {
+        display: none;
+      }
+
+      #gameover-inner h1 {
+        margin: 0;
+        font-size: clamp(42px, 8.5vw, 104px);
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+
+      #gameover-inner p {
+        margin: 10px 0 0;
+        font-size: 25px;
+        color: rgba(255, 255, 255, 0.82);
+      }
+
+      #gameover-inner .size {
+        margin-top: 8px;
+        font-size: 19px;
+        font-weight: 600;
+        color: var(--gold);
+      }
+
+      #lobby {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(circle at 50% 35%, #15365f 0%, #081426 70%);
+        color: var(--ink);
+      }
+
+      /* display:grid above would otherwise defeat the hidden attribute */
+      #lobby[hidden] {
+        display: none;
+      }
+
+      #lobby-panel {
+        width: min(92vw, 360px);
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 28px;
+        border-radius: 16px;
+        background: rgba(8, 20, 38, 0.72);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+      }
+
+      #lobby h1 {
+        margin: 0;
+        font-size: 34px;
+        letter-spacing: -0.5px;
+        text-align: center;
+      }
+
+      #lobby h1 span {
+        color: var(--accent);
+      }
+
+      #lobby-message {
+        margin: 0;
+        min-height: 1.2em;
+        text-align: center;
+        font-size: 14px;
+        color: var(--gold);
+      }
+
+      #lobby label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 13px;
+        color: rgba(232, 241, 255, 0.72);
+      }
+
+      #nickname {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 11px 12px;
+        font-size: 16px;
+        font-family: inherit;
+        color: var(--ink);
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 9px;
+      }
+
+      #nickname:focus-visible,
+      #play:focus-visible,
+      #color:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      .row {
+        display: flex;
+        align-items: flex-end;
+        gap: 14px;
+      }
+
+      .row > :first-child {
+        flex: 1;
+      }
+
+      #color {
+        width: 52px;
+        height: 44px;
+        padding: 2px;
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 9px;
+      }
+
+      #play {
+        padding: 13px;
+        font-size: 17px;
+        font-family: inherit;
+        font-weight: 650;
+        color: #04121f;
+        background: var(--accent);
+        border: 0;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+
+      #play:hover:enabled {
+        background: #63bdfa;
+      }
+
+      #play:disabled {
+        opacity: 0.5;
+        cursor: progress;
+      }
+
+      #lobby .hint {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.5;
+        text-align: center;
+        color: rgba(232, 241, 255, 0.55);
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" aria-label="HappyShark.io play area">
+      HappyShark.io needs a browser with WebGL support.
+    </canvas>
+
+    <div id="nameplates" class="overlay" aria-hidden="true"></div>
+
+    <div id="leaderboard" hidden>
+      <h2>LEADERBOARD</h2>
+      <ol id="leaderboard-rows"></ol>
+    </div>
+
+    <div id="stats" hidden>
+      <div id="stat-size">Size: 0</div>
+      <div id="stat-rank">Rank: - / -</div>
+    </div>
+
+    <div id="gameover" hidden>
+      <div id="gameover-inner">
+        <h1>GAME OVER</h1>
+        <p id="gameover-cause"></p>
+        <div class="size" id="gameover-size"></div>
+      </div>
+    </div>
+
+    <div id="lobby">
+      <form id="lobby-panel" autocomplete="off">
+        <h1>HappyShark<span>.io</span></h1>
+
+        <p id="lobby-message" role="status" aria-live="polite"></p>
+
+        <div class="row">
+          <div>
+            <label for="nickname">Nickname</label>
+            <input
+              id="nickname"
+              name="nickname"
+              type="text"
+              maxlength="12"
+              placeholder="Up to 12 characters"
+              aria-describedby="nickname-hint"
+            />
+          </div>
+          <div>
+            <label for="color">Colour</label>
+            <input id="color" name="color" type="color" value="#4ad4a0" />
+          </div>
+        </div>
+
+        <p id="nickname-hint" class="hint">Names are capped at 12 characters.</p>
+
+        <button id="play" type="submit">Play</button>
+
+        <p class="hint">
+          Move with the mouse. Space or click to dash, which burns mass for speed.
+          Eat pellets and smaller sharks. The arena walls are lethal.
+        </p>
+      </form>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
