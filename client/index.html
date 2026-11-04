@@ -433,10 +433,57 @@
         color: rgba(232, 241, 255, 0.55);
       }
 
-      /* Phones and portrait screens: compact HUD in the corners, bottom-left
-         left free for the thumb joystick. !important beats the inline styles. */
+      /* Responsive HUD tiers. Later tiers override earlier ones where both
+         match. !important beats the inline styles on the HUD elements. */
+
+      /* =========================================================
+         TIER 1: ALL TOUCH DEVICES (Phones, iPads, Tablets in BOTH Portrait & Landscape)
+         Prevents #mobileDashBtn from ever overlapping #stats or #hudAudioControls from blocking thumb joystick
+         ========================================================= */
+      @media (hover: none), (pointer: coarse) {
+        /* Move #stats (Size/Rank) to Top-Center Pill so bottom-right is 100% reserved for ⚡ DASH */
+        #stats {
+          top: calc(12px + env(safe-area-inset-top, 0px)) !important;
+          left: 50% !important;
+          right: auto !important;
+          bottom: auto !important;
+          transform: translateX(-50%) !important;
+          display: flex !important;
+          gap: 10px !important;
+          align-items: center !important;
+          padding: 6px 14px !important;
+          border-radius: 999px !important;
+          white-space: nowrap !important;
+        }
+
+        /* The display:flex above would otherwise override the hidden attribute
+           and show the panel in the lobby and during the death fade. */
+        #stats[hidden] {
+          display: none !important;
+        }
+
+        /* Dock Audio Toggles neatly under the top-left Minimap so bottom-left is 100% free for the Virtual Joystick */
+        #hudAudioControls {
+          top: calc(174px + env(safe-area-inset-top, 0px)) !important;
+          left: calc(16px + env(safe-area-inset-left, 0px)) !important;
+          bottom: auto !important;
+          gap: 8px !important;
+        }
+
+        /* Ergonomic thumb position for ⚡ DASH on iPad & Tablet Landscape (shifted slightly up from bottom corner) */
+        #mobileDashBtn {
+          right: calc(28px + env(safe-area-inset-right, 0px)) !important;
+          bottom: calc(56px + env(safe-area-inset-bottom, 0px)) !important;
+          width: 78px !important;
+          height: 78px !important;
+          font-size: 13px !important;
+        }
+      }
+
+      /* =========================================================
+         TIER 2: PORTRAIT SCREENS & NARROW VIEWPORTS (Phones & Portrait Tablets)
+         ========================================================= */
       @media (max-width: 640px), (orientation: portrait) {
-        /* 1. Compact top-left minimap (92x92 instead of 150x150) */
         #minimapCanvas {
           top: calc(10px + env(safe-area-inset-top, 0px)) !important;
           left: calc(10px + env(safe-area-inset-left, 0px)) !important;
@@ -446,14 +493,12 @@
           border-width: 1.5px !important;
         }
 
-        /* 2. Audio toggles directly below the minimap */
         #hudAudioControls {
           top: calc(108px + env(safe-area-inset-top, 0px)) !important;
           left: calc(10px + env(safe-area-inset-left, 0px)) !important;
           bottom: auto !important;
           gap: 6px !important;
         }
-
         #hudAudioControls button {
           width: 30px !important;
           height: 30px !important;
@@ -461,48 +506,35 @@
           padding: 0 !important;
         }
 
-        /* 3. Compact top-right leaderboard, top 5 only */
+        #stats {
+          top: calc(10px + env(safe-area-inset-top, 0px)) !important;
+          left: 50% !important;
+          right: auto !important;
+          bottom: auto !important;
+          transform: translateX(-50%) !important;
+          padding: 4px 10px !important;
+          font-size: 11px !important;
+          border-radius: 999px !important;
+        }
+
         #leaderboard {
           top: calc(10px + env(safe-area-inset-top, 0px)) !important;
           right: calc(10px + env(safe-area-inset-right, 0px)) !important;
           width: 138px !important;
-          max-width: 42vw !important;
+          max-width: 40vw !important;
           padding: 6px 8px !important;
           border-radius: 8px !important;
           font-size: 11px !important;
-          line-height: 17px !important;
-          box-sizing: border-box !important;
         }
-
-        #leaderboard h2 {
+        #leaderboard h2,
+        #leaderboard h3 {
           font-size: 11px !important;
           margin: 0 0 4px 0 !important;
         }
 
-        #leaderboard-rows li:nth-child(n + 6) {
-          display: none !important;
-        }
-
-        /* Size/rank panel moves from bottom-right (the dash button's spot) to
-           top-centre, between the minimap and the leaderboard. */
-        #stats {
-          top: calc(10px + env(safe-area-inset-top, 0px)) !important;
-          bottom: auto !important;
-          left: 50% !important;
-          right: auto !important;
-          transform: translateX(-50%) !important;
-          min-width: 0 !important;
-          padding: 5px 9px !important;
-          border-radius: 8px !important;
-          font-size: 11px !important;
-          line-height: 16px !important;
-          white-space: nowrap !important;
-        }
-
-        /* 4. Sleeker bottom-right dash button and touch joystick */
         #mobileDashBtn {
-          right: calc(16px + env(safe-area-inset-right, 0px)) !important;
-          bottom: calc(18px + env(safe-area-inset-bottom, 0px)) !important;
+          right: calc(18px + env(safe-area-inset-right, 0px)) !important;
+          bottom: calc(36px + env(safe-area-inset-bottom, 0px)) !important;
           width: 68px !important;
           height: 68px !important;
           font-size: 12px !important;
@@ -514,7 +546,6 @@
           margin-left: -46px !important;
           margin-top: -46px !important;
         }
-
         #touchJoystickKnob {
           width: 34px !important;
           height: 34px !important;
@@ -522,24 +553,83 @@
           margin-top: -17px !important;
         }
 
-        /* 5. Lobby card and colour popover for narrow screens */
         #lobby-panel {
           width: min(92vw, 350px) !important;
           padding: 18px 16px !important;
           box-sizing: border-box !important;
         }
-
         .color-popover {
           width: min(88vw, 270px) !important;
           left: 50% !important;
-          /* Keeps the existing vertical centring as well. */
           transform: translate(-50%, -50%) !important;
           box-sizing: border-box !important;
         }
-
         #lobbyPreviewCanvas {
           width: 100% !important;
           height: auto !important;
+        }
+      }
+
+      /* =========================================================
+         TIER 3: PHONE LANDSCAPE (Short height <= 540px in Landscape)
+         Keeps HUD sleek when holding a phone horizontally
+         ========================================================= */
+      @media (orientation: landscape) and (max-height: 540px) {
+        #minimapCanvas {
+          top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+          left: calc(12px + env(safe-area-inset-left, 0px)) !important;
+          width: 84px !important;
+          height: 84px !important;
+          border-radius: 8px !important;
+        }
+
+        #hudAudioControls {
+          top: calc(98px + env(safe-area-inset-top, 0px)) !important;
+          left: calc(12px + env(safe-area-inset-left, 0px)) !important;
+          bottom: auto !important;
+          gap: 6px !important;
+        }
+        #hudAudioControls button {
+          width: 28px !important;
+          height: 28px !important;
+          font-size: 12px !important;
+          padding: 0 !important;
+        }
+
+        #stats {
+          top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+          left: 50% !important;
+          right: auto !important;
+          bottom: auto !important;
+          transform: translateX(-50%) !important;
+          padding: 4px 12px !important;
+          font-size: 11px !important;
+          border-radius: 999px !important;
+        }
+
+        #leaderboard {
+          top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+          right: calc(12px + env(safe-area-inset-right, 0px)) !important;
+          width: 145px !important;
+          padding: 5px 8px !important;
+          font-size: 11px !important;
+        }
+        #leaderboard-rows > *:nth-child(n + 5) {
+          display: none !important;
+        }
+
+        #mobileDashBtn {
+          right: calc(22px + env(safe-area-inset-right, 0px)) !important;
+          bottom: calc(34px + env(safe-area-inset-bottom, 0px)) !important;
+          width: 64px !important;
+          height: 64px !important;
+          font-size: 12px !important;
+        }
+
+        #lobby-panel {
+          max-height: 90vh !important;
+          overflow-y: auto !important;
+          padding: 14px 18px !important;
         }
       }
     </style>
