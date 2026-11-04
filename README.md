@@ -51,9 +51,9 @@ flowchart TD
     Kinematics --> Elliptical
     Elliptical --> MassRules
     MassRules --> DeltaComp
-    DeltaComp -->|"foodUpdate {removedIds, added[kind, originX, originY]}"| LerpEngine
+    DeltaComp -->|"foodUpdate {eatenIds, newFood[kind, originX, originY]}"| LerpEngine
     DeltaComp -->|"Batched sfx[] {eat, bump, chomp, death}"| WebAudio
-    Kinematics -->|"state {players} @ 30Hz"| LerpEngine
+    Kinematics -->|"stateUpdate {players} @ 30Hz"| LerpEngine
     LerpEngine --> Sharks
     LerpEngine --> Instanced
     LerpEngine --> HUD
@@ -100,7 +100,7 @@ flowchart TD
 * **The Problem:** Rendering 1,500 food pellets, dozens of dried-fish remains, and 160 ambient rising bubbles as individual `THREE.Mesh` objects would exceed 1,700 WebGL draw calls per frame, crippling mobile and tablet GPUs.
 * **The Solution:** The entire environmental ecosystem is packed into **three hardware-instanced buffers** (`THREE.InstancedMesh`), collapsing 1,700+ entities into **3 draw calls**:
   1. `foodInstancedMesh`: Glowing spherical plankton pellets (`capacity = 1500`).
-  2. `fishInstancedMesh`: Custom-indexed 3D diamond-and-forked-tail dried fish (`魚乾`) meshes (`DoubleSide` amber material) dropped upon shark deaths and collisions.
+  2. `fishInstancedMesh`: Custom non-indexed 3D diamond-and-forked-tail dried fish (`魚乾`) meshes (`DoubleSide` amber material) dropped upon shark deaths and collisions.
   3. `bubbleInstancedMesh`: 160 translucent underwater bubbles continuously rising and wobbling across the water column.
 * **Solving the `frustumCulled = false` Trap:** Three.js computes instanced bounding spheres from the base geometry at the origin. Across a $5000 \times 5000$ arena, panning the camera caused Three.js to falsely cull the entire food batch whenever the origin left the view frustum. Explicitly setting `.frustumCulled = false` on all instanced meshes guarantees zero pop-in at locked 60 FPS.
 
@@ -111,8 +111,8 @@ flowchart TD
   2. When a large shark devours a smaller shark, instant 100% score absorption gives nearby scavengers zero opportunity to contest the kill.
 * **The Solution:**
   * **Elastic Impulse & Exponential Decay:** Colliding sharks of comparable size trigger `elasticBump` (throttled per pair to 280ms), applying opposing knockback velocity vectors ($\|\mathbf{v}_{\text{knock}}\| = 520\text{ units/s}$) integrated alongside exponential drag ($\mathbf{v}_{t+\Delta t} = \mathbf{v}_t \cdot e^{-7.5\Delta t}$), accompanied by an expanding 3D shockwave ring.
-  * **Strict Mass-Conserving Dried-Fish Burst:** Both elastic bumps (6% mass loss) and lethal events (PvP kills & wall crashes) convert lost biomass into golden 3D dried-fish (`kind: 'fish'`) scattered across a radius scaled by the victim's size ($r_{\text{inner}} = 0.65r + 28$, $r_{\text{outer}} = \min(360, 2.75r + 105)$), with exact remainder accounting so zero free mass is ever fabricated.
-  * **Parabolic Pop-Out Arc & 320ms Grace Period:** Newly spawned fish carry `(originX, originY)` and a server-side `pickupReadyAt = now + 320ms` lock. For the first 330ms, the client interpolates each fish outward along a cubic ease-out trajectory with a sinusoidal vertical hop ($\Delta y = 32 \sin(\pi t)$) while the server prevents the killer from instantly vacuuming the pile, creating thrilling scavenger scrambles.
+  * **Strict Mass-Conserving Dried-Fish Burst:** Both elastic bumps (6% mass loss) and lethal events (PvP kills & wall crashes) convert lost biomass into golden 3D dried-fish (`kind: 'fish'`) scattered across a radius scaled by the victim's size ($r_{\text{inner}} = 0.65r + 28$, $r_{\text{outer}} = \min(360, 2.75r + 105)$), with exact remainder accounting so zero free mass is ever fabricated. Bursts are capped by `FOOD_HARD_CAP = 1500`: when the food pool is full, fewer (or no) fish spawn and the excess mass is discarded rather than created.
+  * **Parabolic Pop-Out Arc & 320–340ms Grace Period:** Newly spawned fish carry `(originX, originY)` and a server-side `pickupReadyAt = now + 320–340ms` lock (320ms on bumps, 340ms on deaths). For the first 330ms, the client interpolates each fish outward along a cubic ease-out trajectory with a sinusoidal vertical hop ($\Delta y = 32 \sin(\pi t)$) while the server prevents the killer from instantly vacuuming the pile, creating thrilling scavenger scrambles.
 
 ### E. Zero-Asset Procedural 3D Shark Rig & On-Demand Lobby Popover Renderer
 
@@ -165,9 +165,9 @@ $$k = \min\left(1.85,\; 1 + 0.22 \cdot \max\left(0, \frac{R - 20}{20}\right)\rig
 ### The "Inertia Meta" & Continuous Hold-to-Dash
 
 * **Universal Base Speed:** Every shark cruises at $v = 250\text{ units/s}$, preventing larger sharks from mindlessly running down smaller ones in a straight line.
-* **Hyperbolic Turn-Rate Penalty:** Angular agility decays with radius:
+* **Linear Turn-Rate Penalty:** Angular agility decays with radius:
 
-  $$\omega(R) = \max\left(1.0,\; \frac{6.0}{1 + R / 50}\right)\text{ rad/s}$$
+  $$\omega(R) = \max\left(1.0,\; 6.0 - \frac{R}{50}\right)\text{ rad/s}$$
 
   Small sharks execute tight pivot circles to outmaneuver giants, while giants must rely on trajectory prediction, cornering, and dash timing.
 * **Continuous Hold-to-Dash:** Holding Dash multiplies speed by $1.5\times$ while continuously burning $5\text{ score/s}$ down to the minimum threshold ($s = 10$).
@@ -220,7 +220,7 @@ npm run dev
 | Variable | Context | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `PORT` | Server | `3000` | HTTP & WebSocket listening port. |
-| `CLIENT_ORIGIN` | Server | `*` | Allowed CORS origin for production (e.g., `https://onlineshark-io.vercel.app`). |
+| `CLIENT_ORIGIN` | Server | `http://localhost:5173` | Allowed CORS origin for production (e.g., `https://onlineshark-io.vercel.app`). |
 | `VITE_SERVER_URL` | Client | `http://localhost:3000` | Target backend URL for Socket.IO connection. |
 
 ---
