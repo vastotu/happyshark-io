@@ -58,18 +58,13 @@ const FOOD_HARD_CAP = 1500;
 // needs about 32% more mass than its prey.
 const EAT_RATIO_SCORE = 1.15 ** 2;
 
-// Two sharks too evenly matched to eat each other grind mass off one another,
-// and that mass drops to the sea floor as pellets.
-const BUMP_DRAIN_PER_SECOND = 0.05;
-const BUMP_SCORE_FLOOR = 1;
+// Two sharks too evenly matched to eat each other bounce apart, each losing a
+// share of mass that pops out as dried fish. One bump per pair per cooldown.
+const BUMP_COOLDOWN_MS = 280;
 
 // Death and bump drops land as dried fish rather than plain pellets. A dead
 // shark bursts into fish worth its whole score (see spawnDeathFishBurst).
 const FISH_COLOR = '#f5a642';
-const FISH_BUMP_VALUE = 1;
-
-// Bump sounds fire at most this often per pair of sharks.
-const BUMP_SFX_THROTTLE_MS = 200;
 
 const MAX_NAME_LENGTH = 12;
 const DEFAULT_NAME = 'Shark';
@@ -119,9 +114,6 @@ const TICK_MS = 1000 / TICK_RATE;
 // scanned, never addressed by key.
 const gameState = { players: {}, food: [] };
 
-// Fractional bump losses bank here until they are worth a whole pellet, so
-// drained mass is conserved rather than rounded away every tick.
-const dropDebt = new Map();
 
 // Outbound events collected during a tick and flushed at the end of it.
 let tickEatenFood = [];
@@ -129,8 +121,8 @@ let tickNewFood = [];
 let tickDeaths = [];
 let tickSfx = [];
 
-// Last bump sound per pair of sharks, for throttling.
-const lastBumpSfx = new Map();
+// Last bump time per pair of sharks, keyed by sorted `${id1}:${id2}`.
+const bumpCooldowns = new Map();
 
 let botSerial = 0;
 let nextBotSpawnAt = 0;
@@ -271,6 +263,9 @@ function createPlayer(id, name, color) {
     isBot: false,
     // Wall-clock spawn time, for the survival time shown on death.
     spawnedAt: Date.now(),
+    // Knockback velocity from bumps, in units per second. Decays every tick.
+    vx: 0,
+    vy: 0,
   };
 
   player.targetAngle = Math.atan2(WORLD.height / 2 - player.y, WORLD.width / 2 - player.x);
@@ -283,7 +278,9 @@ function createPlayer(id, name, color) {
 
 /**
  * Builds one food item. A plain pellet at a random spot by default; death and
- * bump drops override kind, colour, rotation, value and position.
+ * bump drops override kind, colour, rotation, value and position. Popped fish
+ * also carry `originX`/`originY` (where the client animates them from) and a
+ * `pickupReadyAt` wall-clock time before which nobody can eat them.
  */
 function createFoodItem(overrides = {}) {
   const item = {
@@ -292,6 +289,7 @@ function createFoodItem(overrides = {}) {
     value: FOOD_SCORE,
     rot: 0,
     color: randomHexColor(),
+    pickupReadyAt: 0,
     ...overrides,
   };
 
@@ -324,39 +322,19 @@ function generateFood(count) {
   return created;
 }
 
-/** Scatters `count` dried fish worth `value` each around a point, within `spread`. */
-function scatterFish(count, x, y, spread, value) {
-  const created = [];
-
-  for (let i = 0; i < count; i += 1) {
-    if (gameState.food.length >= FOOD_HARD_CAP) break;
-
-    const angle = Math.random() * Math.PI * 2;
-    const distance = Math.random() * spread;
-    const fish = createFoodItem({
-      x: x + Math.cos(angle) * distance,
-      y: y + Math.sin(angle) * distance,
-      kind: 'fish',
-      color: FISH_COLOR,
-      rot: Number((Math.random() * Math.PI * 2).toFixed(2)),
-      value,
-    });
-
-    gameState.food.push(fish);
-    created.push(fish);
-  }
-
-  return created;
-}
-
 /** Eats every food item overlapping `player`; returns the ids consumed. */
 function eatNearbyFood(player) {
   const eaten = [];
   let ateFish = false;
+  // Same clock as pickupReadyAt.
+  const now = Date.now();
 
   // Walk backwards so splice() can't make us skip the next entry.
   for (let i = gameState.food.length - 1; i >= 0; i -= 1) {
     const food = gameState.food[i];
+    // Freshly popped fish are still mid-air on clients; let them land first.
+    if (food.pickupReadyAt && now < food.pickupReadyAt) continue;
+
     const d = Math.hypot(player.x - food.x, player.y - food.y);
 
     if (d < player.radius + FOOD_RADIUS) {
@@ -390,20 +368,28 @@ function spawnDeathFishBurst(victim, addedFood) {
   const availableSlots = Math.max(0, FOOD_HARD_CAP - gameState.food.length);
   if (availableSlots <= 0) return;
 
+  const now = Date.now();
   const totalScore = Math.max(3, Math.round(victim.score));
-  const desiredCount = Math.min(40, Math.max(4, Math.round(totalScore / 3.5)));
+  const desiredCount = Math.min(42, Math.max(6, Math.round(totalScore / 3.2)));
   const dropCount = Math.min(desiredCount, availableSlots);
   const valuePerFish = Number((totalScore / dropCount).toFixed(2));
-  const spread = Math.max(28, victim.radius * 0.95);
+
+  // Scale scatter ring by victim radius so bigger sharks burst over a wider area
+  const innerRadius = victim.radius * 0.65 + 28;
+  const outerRadius = Math.min(360, victim.radius * 2.75 + 105);
 
   for (let i = 0; i < dropCount; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const dist = Math.sqrt(Math.random()) * spread;
+    const angle = (Math.PI * 2 * i) / dropCount + (Math.random() - 0.5) * 0.35;
+    const t = Math.sqrt(Math.random());
+    const dist = innerRadius + t * (outerRadius - innerRadius);
     const fx = Math.max(FOOD_MARGIN, Math.min(WORLD.width - FOOD_MARGIN, victim.x + Math.cos(angle) * dist));
     const fy = Math.max(FOOD_MARGIN, Math.min(WORLD.height - FOOD_MARGIN, victim.y + Math.sin(angle) * dist));
     const fish = createFoodItem({
       x: Number(fx.toFixed(1)),
       y: Number(fy.toFixed(1)),
+      originX: Number(victim.x.toFixed(1)),
+      originY: Number(victim.y.toFixed(1)),
+      pickupReadyAt: now + 340,
       color: FISH_COLOR,
       value: valuePerFish,
       kind: 'fish',
@@ -423,7 +409,6 @@ function killPlayer(id, { cause, eatenBy = null, eatenByName = null }) {
   spawnDeathFishBurst(player, tickNewFood);
 
   delete gameState.players[id];
-  dropDebt.delete(id);
 
   tickSfx.push({ type: 'death', x: player.x, y: player.y, playerId: id });
 
@@ -465,33 +450,78 @@ function devour(predator, prey) {
 }
 
 /**
- * Two sharks too evenly matched to eat each other grind mass off both sides.
- * The lost mass is re-spawned as pellets between them, so a third shark (or
- * whoever wins the shoving match) can pick it up.
+ * Two sharks too evenly matched to eat each other bounce apart elastically.
+ * Each loses 6% of its score, which pops out of the impact point as 3-8 fish.
  */
-function grindBump(a, b, deltaTime) {
-  const midX = (a.x + b.x) / 2;
-  const midY = (a.y + b.y) / 2;
-  const spread = (a.radius + b.radius) * 0.6;
+function elasticBump(p1, p2, now, addedFood, sfxQueue) {
+  const pairKey = p1.id < p2.id ? `${p1.id}:${p2.id}` : `${p2.id}:${p1.id}`;
+  if (now - (bumpCooldowns.get(pairKey) || 0) < BUMP_COOLDOWN_MS) return;
+  bumpCooldowns.set(pairKey, now);
 
-  for (const player of [a, b]) {
-    const loss = Math.min(
-      player.score * BUMP_DRAIN_PER_SECOND * deltaTime,
-      Math.max(0, player.score - BUMP_SCORE_FLOOR),
-    );
-    if (loss <= 0) continue;
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const nx = dx / dist;
+  const ny = dy / dist;
 
-    player.score -= loss;
-    refreshPlayerSize(player);
+  // Bounce both sharks apart!
+  const knockImpulse = 520;
+  p1.vx = -nx * knockImpulse;
+  p1.vy = -ny * knockImpulse;
+  p2.vx = nx * knockImpulse;
+  p2.vy = ny * knockImpulse;
 
-    const banked = (dropDebt.get(player.id) ?? 0) + loss;
-    const pellets = Math.floor(banked);
-    dropDebt.set(player.id, banked - pellets);
+  // Sharks above score 11 lose 6% (never below 10). Exactly that mass pops out
+  // of the impact midpoint as fish; if nobody lost anything, no fish appear.
+  const midX = (p1.x + p2.x) * 0.5;
+  const midY = (p1.y + p2.y) * 0.5;
+  let totalLost = 0;
 
-    if (pellets > 0) {
-      tickNewFood.push(...scatterFish(pellets, midX, midY, spread, FISH_BUMP_VALUE));
+  for (const p of [p1, p2]) {
+    if (p.score > 11) {
+      const before = p.score;
+      const loss = Math.max(1, p.score * 0.06);
+      p.score = Math.max(10, p.score - loss);
+      refreshPlayerSize(p);
+      // What was actually removed, in case the floor ever clips the loss.
+      totalLost += before - p.score;
     }
   }
+
+  if (totalLost > 0) {
+    const availableSlots = Math.max(0, FOOD_HARD_CAP - gameState.food.length);
+    const burstCount = Math.min(availableSlots, Math.max(3, Math.min(8, Math.round(totalLost / 1.2))));
+    const valPerFish = burstCount > 0 ? Number((totalLost / burstCount).toFixed(2)) : 0;
+    const baseSpread = (p1.radius + p2.radius) * 0.95 + 45;
+    // Wall clock, matching the check in eatNearbyFood.
+    const wallNow = Date.now();
+
+    for (let k = 0; k < burstCount; k++) {
+      const ang = (Math.PI * 2 * k) / burstCount + (Math.random() - 0.5) * 0.45;
+      const r = baseSpread * (0.65 + Math.random() * 0.65);
+      const fx = Math.max(FOOD_MARGIN, Math.min(WORLD.width - FOOD_MARGIN, midX + Math.cos(ang) * r));
+      const fy = Math.max(FOOD_MARGIN, Math.min(WORLD.height - FOOD_MARGIN, midY + Math.sin(ang) * r));
+      // The last fish takes the rounding remainder, so the burst sums to totalLost.
+      const value =
+        k === burstCount - 1 ? Number((totalLost - valPerFish * (burstCount - 1)).toFixed(4)) : valPerFish;
+      const fish = createFoodItem({
+        x: Number(fx.toFixed(1)),
+        y: Number(fy.toFixed(1)),
+        originX: Number(midX.toFixed(1)),
+        originY: Number(midY.toFixed(1)),
+        pickupReadyAt: wallNow + 320,
+        color: FISH_COLOR,
+        value,
+        kind: 'fish',
+        rot: Number((Math.random() * Math.PI * 2).toFixed(2)),
+      });
+
+      gameState.food.push(fish);
+      addedFood.push(fish);
+    }
+  }
+
+  sfxQueue.push({ type: 'bump', x: Math.round(midX), y: Math.round(midY) });
 }
 
 /**
@@ -520,7 +550,7 @@ function checkSharkCollision(A, B) {
  * player count. Eating is checked before draining, so a bump that pushes one
  * side under the 15% threshold resolves as a kill on the following tick.
  */
-function resolvePlayerCollisions(deltaTime, now) {
+function resolvePlayerCollisions(now) {
   const ids = Object.keys(gameState.players);
 
   for (let i = 0; i < ids.length; i += 1) {
@@ -540,13 +570,7 @@ function resolvePlayerCollisions(deltaTime, now) {
       } else if (b.score > a.score * EAT_RATIO_SCORE) {
         devour(b, a);
       } else {
-        grindBump(a, b, deltaTime);
-
-        const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
-        if (now - (lastBumpSfx.get(key) ?? -Infinity) >= BUMP_SFX_THROTTLE_MS) {
-          lastBumpSfx.set(key, now);
-          tickSfx.push({ type: 'bump', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, playerId: a.id });
-        }
+        elasticBump(a, b, now, tickNewFood, tickSfx);
       }
     }
   }
@@ -645,7 +669,6 @@ function maintainBotPopulation(now) {
 
     // The next stateUpdate simply omits it, which clients treat as a removal.
     delete gameState.players[farthest.id];
-    dropDebt.delete(farthest.id);
     return;
   }
 
@@ -838,7 +861,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', (reason) => {
     delete gameState.players[socket.id];
-    dropDebt.delete(socket.id);
 
     console.log(
       `[socket] disconnected: ${socket.id} (${reason}) (players: ${Object.keys(gameState.players).length})`,
@@ -898,12 +920,19 @@ setInterval(() => {
       player.dashTimer = 0;
     }
 
-    // Scaling by deltaTime keeps travel speed constant even if a tick runs late.
-    const distance = speed * deltaTime;
+    // Travel along the body's actual heading, plus any bump knockback.
+    // Scaling by deltaTime keeps speed constant even if a tick runs late.
+    const dt = deltaTime;
+    player.x += (Math.cos(player.angle) * speed + (player.vx || 0)) * dt;
+    player.y += (Math.sin(player.angle) * speed + (player.vy || 0)) * dt;
 
-    // Travel along the body's actual heading, not the mouse direction.
-    player.x += Math.cos(player.angle) * distance;
-    player.y += Math.sin(player.angle) * distance;
+    const decay = Math.exp(-7.5 * dt);
+    player.vx = (player.vx || 0) * decay;
+    player.vy = (player.vy || 0) * decay;
+    if (Math.hypot(player.vx, player.vy) < 2) {
+      player.vx = 0;
+      player.vy = 0;
+    }
 
     if (touchesWall(player)) {
       killPlayer(player.id, { cause: 'wall' });
@@ -920,10 +949,10 @@ setInterval(() => {
   }
 
   // 3. Shark vs shark: swallow, or grind each other down.
-  resolvePlayerCollisions(deltaTime, now);
+  resolvePlayerCollisions(now);
 
-  for (const [key, at] of lastBumpSfx) {
-    if (now - at > 1000) lastBumpSfx.delete(key);
+  for (const [key, at] of bumpCooldowns) {
+    if (now - at > 1000) bumpCooldowns.delete(key);
   }
 
   // 4. Flush. Deaths go out first so a victim learns why before the roster
@@ -949,7 +978,7 @@ httpServer.listen(PORT, () => {
   console.log(
     `World: ${WORLD.width}x${WORLD.height} | tick: ${TICK_RATE}Hz | food: ${gameState.food.length}`,
   );
-  console.log(`Walls are lethal | bump drain ${BUMP_DRAIN_PER_SECOND * 100}%/s`);
+  console.log(`Walls are lethal | bumps knock back, cooldown ${BUMP_COOLDOWN_MS}ms`);
   console.log(
     `Speed ${BASE_SPEED} for all | turn ${BASE_TURN_SPEED}..${MIN_TURN_SPEED} rad/s | ` +
       `radius ${MIN_RADIUS}..${MAX_RADIUS} (caps at score ${SATURATION_SCORE})`,

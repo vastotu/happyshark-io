@@ -412,6 +412,19 @@
         cursor: progress;
       }
 
+      #lobby .controls-hint {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.5;
+        text-align: center;
+        color: rgba(232, 241, 255, 0.8);
+      }
+
+      /* The canvas owns every touch gesture during play: no scroll, no zoom. */
+      #game {
+        touch-action: none;
+      }
+
       #lobby .hint {
         margin: 0;
         font-size: 12px;
@@ -498,9 +511,11 @@
 
         <button id="play" type="submit">Play</button>
 
+        <p class="controls-hint">🖱️ Mouse / WASD / Arrows to steer · Hold Space / Shift / Click to Dash</p>
+
         <p class="hint">
-          Move with the mouse. Hold space or click to dash, which burns mass for speed.
-          Eat pellets and smaller sharks. The arena walls are lethal.
+          Dashing burns mass for speed. Eat pellets, dried fish and smaller sharks.
+          The arena walls are lethal.
         </p>
 
         <div class="audio-toggles">
@@ -509,6 +524,12 @@
         </div>
       </form>
     </div>
+
+    <div id="touchJoystick" style="position:fixed; width:110px; height:110px; margin-left:-55px; margin-top:-55px; border-radius:50%; border:2px solid rgba(130,220,255,0.45); background:radial-gradient(circle, rgba(56,189,248,0.18), rgba(4,30,52,0.35)); pointer-events:none; z-index:14; display:none;">
+      <div id="touchJoystickKnob" style="position:absolute; left:50%; top:50%; width:42px; height:42px; margin-left:-21px; margin-top:-21px; border-radius:50%; background:rgba(180,240,255,0.75); box-shadow:0 0 12px rgba(56,189,248,0.8);"></div>
+    </div>
+
+    <button id="mobileDashBtn" type="button" style="position:fixed; right:22px; bottom:22px; width:82px; height:82px; border-radius:50%; border:2px solid rgba(255,215,90,0.75); background:radial-gradient(circle at 35% 30%, rgba(255,190,40,0.85), rgba(215,90,20,0.78)); color:#fff; font-weight:800; font-size:14px; letter-spacing:0.5px; box-shadow:0 6px 20px rgba(0,0,0,0.45); z-index:16; display:none; user-select:none; -webkit-user-select:none; touch-action:none;">⚡ DASH</button>
 
     <div id="hudAudioControls">
       <button id="hudBgmBtn" type="button" title="Toggle music" aria-label="Toggle music">🎵</button>

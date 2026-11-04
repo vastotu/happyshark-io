@@ -99,9 +99,11 @@ const SFX_PREF_KEY = 'happyshark.sfx';
 const CHIME_NOTES = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3];
 const CHIME_INTERVAL_MS = 1800;
 
+// Session-scoped: every new visit starts with music and sound on, and a toggle
+// only sticks for the rest of that tab's session.
 function loadAudioPref(key) {
   try {
-    const value = localStorage.getItem(key);
+    const value = sessionStorage.getItem(key);
     return value === null ? true : value === '1';
   } catch {
     return true;
@@ -110,7 +112,7 @@ function loadAudioPref(key) {
 
 function saveAudioPref(key, enabled) {
   try {
-    localStorage.setItem(key, enabled ? '1' : '0');
+    sessionStorage.setItem(key, enabled ? '1' : '0');
   } catch {
     /* storage is best effort */
   }
@@ -303,7 +305,9 @@ const SoundManager = (() => {
   /** Starts, stops or swaps the BGM so it matches the toggle and the mode. */
   function syncBgm() {
     if (!ctx) return;
-    const wanted = bgmEnabled && running() ? bgmMode : null;
+    // Nodes may be built while the context is still resuming; they start
+    // sounding the moment it runs, so there is no need to wait for 'running'.
+    const wanted = bgmEnabled && ctx.state !== 'closed' ? bgmMode : null;
 
     bgmBus.gain.cancelScheduledValues(ctx.currentTime);
     bgmBus.gain.setValueAtTime(wanted ? 1 : 0, ctx.currentTime);
@@ -321,6 +325,15 @@ const SoundManager = (() => {
   function setBgmMode(mode) {
     bgmMode = mode === 'game' ? 'game' : 'lobby';
     syncBgm();
+  }
+
+  /**
+   * Called synchronously from the Play gesture: creates/resumes the context
+   * and builds the ocean soundscape inside the same user activation.
+   */
+  function startGameAudioImmediate() {
+    unlock();
+    setBgmMode('game');
   }
 
   // --- Dash whoosh ---
@@ -461,6 +474,7 @@ const SoundManager = (() => {
   return {
     unlock,
     setBgmMode,
+    startGameAudioImmediate,
     toggleBgm,
     toggleSfx,
     setDashLoop,
@@ -691,6 +705,48 @@ const _fishEuler = new THREE.Euler();
 const _fishQuaternion = new THREE.Quaternion();
 const _fishScale = new THREE.Vector3(1.15, 1.15, 1.15);
 
+// Length of the pop-out arc for freshly dropped fish.
+const FISH_POP_MS = 330;
+
+// --- Shockwave rings --------------------------------------------------------
+
+const SHOCKWAVE_MS = 340;
+const shockwaveGeometry = new THREE.RingGeometry(8, 13, 32);
+shockwaveGeometry.rotateX(-Math.PI / 2); // lie flat on the water
+const shockwaves = [];
+
+/** An expanding, fading ring at an impact point: blue for bumps, orange for kills. */
+function spawnShockwave(x, y, color) {
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.75,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(shockwaveGeometry, material);
+  mesh.position.set(x, 2.5, y);
+  scene.add(mesh);
+  shockwaves.push({ mesh, bornAt: performance.now() });
+}
+
+function updateShockwaves(now) {
+  for (let i = shockwaves.length - 1; i >= 0; i--) {
+    const wave = shockwaves[i];
+    const t = (now - wave.bornAt) / SHOCKWAVE_MS;
+
+    if (t >= 1) {
+      scene.remove(wave.mesh);
+      wave.mesh.material.dispose();
+      shockwaves.splice(i, 1);
+      continue;
+    }
+
+    wave.mesh.scale.setScalar(1 + t * 5.5);
+    wave.mesh.material.opacity = 0.75 * (1 - t);
+  }
+}
+
 /** Rebuild every food instance from `localGameState.food`, split by kind. */
 function syncFoodInstances(now) {
   const food = localGameState.food;
@@ -701,7 +757,20 @@ function syncFoodInstances(now) {
     if (item.kind === 'fish') {
       if (fish >= FOOD_INSTANCE_CAPACITY) continue;
 
-      _fishPosition.set(item.x, 6 + Math.sin(now * 0.004 + item.x) * 1.5, item.y);
+      let fx = item.x;
+      let fz = item.y;
+      let fy = 6 + Math.sin(now * 0.004 + item.x) * 1.5;
+
+      // Pop-out: ease from the impact point to the landing spot along an arc.
+      if (item.clientBornAt && now - item.clientBornAt < FISH_POP_MS) {
+        const t = (now - item.clientBornAt) / FISH_POP_MS;
+        const e = 1 - Math.pow(1 - t, 3);
+        fx = item.originX + (item.x - item.originX) * e;
+        fz = item.originY + (item.y - item.originY) * e;
+        fy += Math.sin(t * Math.PI) * 32;
+      }
+
+      _fishPosition.set(fx, fy, fz);
       // YXZ: tilt about the fish's own X first, then spin it about Y.
       _fishEuler.set(0.25, item.rot || 0, 0, 'YXZ');
       _fishQuaternion.setFromEuler(_fishEuler);
@@ -1024,6 +1093,16 @@ function setGameHudVisible(visible) {
   gameHudVisible = visible;
   minimapCanvas.style.display = visible ? 'block' : 'none';
   hudAudioControls.style.display = visible ? 'flex' : 'none';
+  refreshTouchHud();
+}
+
+/** The dash button shows only in game on touch devices; the joystick hides with it. */
+function refreshTouchHud() {
+  mobileDashBtn.style.display = gameHudVisible && isTouchDevice ? 'block' : 'none';
+  if (!gameHudVisible) {
+    steerTouchId = null;
+    hideJoystick();
+  }
 }
 
 function drawMinimap(now) {
@@ -1131,9 +1210,11 @@ lobbyPanel.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!socket.connected) return;
 
+  SoundManager.startGameAudioImmediate();
   SoundManager.playClick();
-  SoundManager.setBgmMode('game');
   setColorPopoverOpen(false);
+  lastSentAngle = null;
+  touchSteerAngle = null;
   playing = true;
   gameOver = null;
   lastCamera = null;
@@ -1184,6 +1265,11 @@ socket.on('foodUpdate', ({ eatenIds, newFood }) => {
   }
 
   if (newFood?.length) {
+    // Popped fish animate from their origin; the welcome pool never does.
+    const bornAt = performance.now();
+    for (const item of newFood) {
+      if (item.originX !== undefined) item.clientBornAt = bornAt;
+    }
     localGameState.food.push(...newFood);
     newFood.forEach(addPellet);
   }
@@ -1199,6 +1285,9 @@ socket.on('sfx', (events) => {
   const played = new Set();
 
   for (const event of events) {
+    if (event.type === 'bump') spawnShockwave(event.x, event.y, 0x99ecff);
+    else if (event.type === 'chomp') spawnShockwave(event.x, event.y, 0xffbb55);
+
     if (event.type === 'death') {
       if (event.playerId === myId) SoundManager.playDeath();
       continue;
@@ -1274,12 +1363,18 @@ const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const groundHit = new THREE.Vector3();
 let pointerMoved = false;
 
+// Which device is steering right now: 'mouse', 'keyboard' or 'touch'. The
+// last one used wins.
+let inputMode = 'mouse';
+let lastSentAngle = null;
+
 window.addEventListener('mousemove', (event) => {
   pointer.set(
     (event.clientX / window.innerWidth) * 2 - 1,
     -(event.clientY / window.innerHeight) * 2 + 1,
   );
   pointerMoved = true;
+  inputMode = 'mouse';
 });
 
 /** World-space aim angle from the shark toward the cursor's point on the water. */
@@ -1298,67 +1393,246 @@ function aimAngle(me) {
   return Math.atan2(-pointer.y, pointer.x);
 }
 
+// --- Keyboard steering ---
+
+const STEER_KEYS = {
+  KeyW: 'up',
+  ArrowUp: 'up',
+  KeyS: 'down',
+  ArrowDown: 'down',
+  KeyA: 'left',
+  ArrowLeft: 'left',
+  KeyD: 'right',
+  ArrowRight: 'right',
+};
+const DASH_KEYS = new Set(['Space', 'ShiftLeft', 'ShiftRight', 'KeyE']);
+
+const steerHeld = new Set(); // held directions: 'up' | 'down' | 'left' | 'right'
+const dashKeysDown = new Set(); // held dash key codes
+
+/** World heading from the held arrows/WASD, or null if none (or they cancel). */
+function keyboardAngle() {
+  const kx = (steerHeld.has('right') ? 1 : 0) - (steerHeld.has('left') ? 1 : 0);
+  const ky = (steerHeld.has('down') ? 1 : 0) - (steerHeld.has('up') ? 1 : 0);
+  if (kx === 0 && ky === 0) return null;
+  // Screen up is world -y under this camera, so screen axes map straight over.
+  return Math.atan2(ky, kx);
+}
+
+// --- Touch steering (virtual joystick) ---
+
+const touchJoystick = document.querySelector('#touchJoystick');
+const touchJoystickKnob = document.querySelector('#touchJoystickKnob');
+const mobileDashBtn = document.querySelector('#mobileDashBtn');
+
+const JOYSTICK_KNOB_MAX = 38; // px
+const JOYSTICK_DEADZONE = 6; // px
+const DOUBLE_TAP_MS = 280;
+
+let isTouchDevice = navigator.maxTouchPoints > 0;
+let steerTouchId = null;
+let joyOriginX = 0;
+let joyOriginY = 0;
+let joyCurrentX = 0;
+let joyCurrentY = 0;
+let touchSteerAngle = null;
+let lastCanvasTapAt = -Infinity;
+
 setInterval(() => {
-  if (!playing || !pointerMoved) return;
+  if (!playing) return;
 
   const me = renderState.players[myId];
   if (!me) return;
 
-  socket.emit('input', { angle: aimAngle(me) });
+  let angle = null;
+  if (inputMode === 'keyboard') angle = keyboardAngle();
+  else if (inputMode === 'touch') angle = touchSteerAngle;
+  else if (pointerMoved) angle = aimAngle(me);
   pointerMoved = false;
+
+  // No input, or nothing changed: the shark keeps its current heading.
+  if (angle === null || angle === lastSentAngle) return;
+  lastSentAngle = angle;
+  socket.emit('input', { angle });
 }, 1000 / INPUT_HZ);
 
-// Dash is held, not tapped. Space and the left mouse button are tracked
-// separately so releasing one while the other is still down keeps dashing.
-const dashHeld = { key: false, mouse: false };
+// --- Dash ---
+// Every dash source is tracked separately and combined, so releasing one while
+// another is still held keeps the dash going.
+let mouseDashHeld = false;
+let dashKeyHeld = false;
+let mobileDashBtnHeld = false;
+let touchDoubleTapDash = false;
 let isDashing = false;
 
 /** Tells the server only when the combined dash state actually flips. */
 function updateDash() {
-  const next = playing && (dashHeld.key || dashHeld.mouse);
-  if (next === isDashing) return;
+  dashKeyHeld = dashKeysDown.size > 0;
+  const shouldDash =
+    playing && (mouseDashHeld || dashKeyHeld || mobileDashBtnHeld || touchDoubleTapDash);
+  if (shouldDash === isDashing) return;
 
-  isDashing = next;
-  socket.emit('dash', { active: next });
+  isDashing = shouldDash;
+  socket.emit('dash', { active: shouldDash });
 }
 
 function resetDash() {
-  dashHeld.key = false;
-  dashHeld.mouse = false;
+  mouseDashHeld = false;
+  mobileDashBtnHeld = false;
+  touchDoubleTapDash = false;
+  dashKeysDown.clear();
   updateDash();
 }
 
 window.addEventListener('keydown', (event) => {
-  // While the lobby is up, space belongs to the nickname field.
-  if (event.code !== 'Space' || !playing) return;
+  // While the lobby is up, every key belongs to the nickname field.
+  if (!playing) return;
 
-  // Still swallow key-repeat so the page never scrolls; updateDash dedupes.
-  event.preventDefault();
-  dashHeld.key = true;
-  updateDash();
+  const dir = STEER_KEYS[event.code];
+  if (dir) {
+    // Arrows would otherwise scroll the page.
+    event.preventDefault();
+    steerHeld.add(dir);
+    inputMode = 'keyboard';
+    return;
+  }
+
+  if (DASH_KEYS.has(event.code)) {
+    // Still swallow key-repeat so the page never scrolls; updateDash dedupes.
+    event.preventDefault();
+    dashKeysDown.add(event.code);
+    updateDash();
+  }
 });
 
 window.addEventListener('keyup', (event) => {
-  if (event.code !== 'Space') return;
-  dashHeld.key = false;
-  updateDash();
+  const dir = STEER_KEYS[event.code];
+  if (dir) steerHeld.delete(dir);
+
+  if (DASH_KEYS.has(event.code)) {
+    dashKeysDown.delete(event.code);
+    updateDash();
+  }
 });
 
 window.addEventListener('mousedown', (event) => {
   if (event.button !== 0 || !playing) return;
-  dashHeld.mouse = true;
+  mouseDashHeld = true;
   updateDash();
 });
 
 window.addEventListener('mouseup', (event) => {
   if (event.button !== 0) return;
-  dashHeld.mouse = false;
+  mouseDashHeld = false;
   updateDash();
 });
 
 // A key or button released while the window is unfocused never fires its up
-// event, which would leave the shark dashing until it starved.
-window.addEventListener('blur', resetDash);
+// event, which would leave the shark steering or dashing until it starved.
+window.addEventListener('blur', () => {
+  steerHeld.clear();
+  resetDash();
+});
+
+// --- Touch handlers ---
+
+function markTouchDevice() {
+  if (isTouchDevice) return;
+  isTouchDevice = true;
+  refreshTouchHud();
+}
+
+function hideJoystick() {
+  touchJoystick.style.display = 'none';
+  touchJoystickKnob.style.transform = '';
+}
+
+canvas.addEventListener(
+  'touchstart',
+  (event) => {
+    // Also suppresses the emulated mouse events that would start a dash.
+    event.preventDefault();
+    markTouchDevice();
+    if (!playing) return;
+
+    const now = performance.now();
+    for (const touch of event.changedTouches) {
+      if (steerTouchId !== null) break;
+
+      steerTouchId = touch.identifier;
+      joyOriginX = joyCurrentX = touch.clientX;
+      joyOriginY = joyCurrentY = touch.clientY;
+      touchJoystick.style.left = `${touch.clientX}px`;
+      touchJoystick.style.top = `${touch.clientY}px`;
+      touchJoystickKnob.style.transform = '';
+      touchJoystick.style.display = 'block';
+
+      // Double-tap and hold: one-handed dash.
+      if (now - lastCanvasTapAt < DOUBLE_TAP_MS) touchDoubleTapDash = true;
+      lastCanvasTapAt = now;
+    }
+
+    updateDash();
+  },
+  { passive: false },
+);
+
+canvas.addEventListener(
+  'touchmove',
+  (event) => {
+    event.preventDefault();
+
+    for (const touch of event.changedTouches) {
+      if (touch.identifier !== steerTouchId) continue;
+
+      joyCurrentX = touch.clientX;
+      joyCurrentY = touch.clientY;
+      const dx = joyCurrentX - joyOriginX;
+      const dy = joyCurrentY - joyOriginY;
+      const len = Math.hypot(dx, dy);
+
+      const scale = len > JOYSTICK_KNOB_MAX ? JOYSTICK_KNOB_MAX / len : 1;
+      touchJoystickKnob.style.transform = `translate(${dx * scale}px, ${dy * scale}px)`;
+
+      if (len > JOYSTICK_DEADZONE) {
+        touchSteerAngle = Math.atan2(dy, dx);
+        inputMode = 'touch';
+      }
+    }
+  },
+  { passive: false },
+);
+
+function endCanvasTouch(event) {
+  for (const touch of event.changedTouches) {
+    if (touch.identifier !== steerTouchId) continue;
+
+    steerTouchId = null;
+    hideJoystick();
+    touchDoubleTapDash = false;
+    updateDash();
+  }
+}
+
+canvas.addEventListener('touchend', endCanvasTouch);
+canvas.addEventListener('touchcancel', endCanvasTouch);
+
+// The dash button is its own touch target, so it works alongside the joystick.
+function setMobileDash(held) {
+  return (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (held) markTouchDevice();
+    mobileDashBtnHeld = held;
+    updateDash();
+  };
+}
+
+mobileDashBtn.addEventListener('touchstart', setMobileDash(true), { passive: false });
+mobileDashBtn.addEventListener('touchend', setMobileDash(false), { passive: false });
+mobileDashBtn.addEventListener('touchcancel', setMobileDash(false), { passive: false });
+mobileDashBtn.addEventListener('mousedown', setMobileDash(true));
+mobileDashBtn.addEventListener('mouseup', setMobileDash(false));
 
 // --- Smoothing --------------------------------------------------------------
 
@@ -1596,6 +1870,7 @@ function frame() {
   // always reflected without per-pellet bookkeeping.
   syncFoodInstances(now);
   updateBubbles(now, dt);
+  updateShockwaves(now);
 
   if (me) {
     placeCamera(renderState.players[myId]);
