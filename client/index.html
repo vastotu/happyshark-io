@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <!-- Empty icon until we have real art; avoids a favicon 404 in the console. -->
     <link rel="icon" href="data:," />
     <title>HappyShark.io</title>
@@ -431,6 +431,116 @@
         line-height: 1.5;
         text-align: center;
         color: rgba(232, 241, 255, 0.55);
+      }
+
+      /* Phones and portrait screens: compact HUD in the corners, bottom-left
+         left free for the thumb joystick. !important beats the inline styles. */
+      @media (max-width: 640px), (orientation: portrait) {
+        /* 1. Compact top-left minimap (92x92 instead of 150x150) */
+        #minimapCanvas {
+          top: calc(10px + env(safe-area-inset-top, 0px)) !important;
+          left: calc(10px + env(safe-area-inset-left, 0px)) !important;
+          width: 92px !important;
+          height: 92px !important;
+          border-radius: 8px !important;
+          border-width: 1.5px !important;
+        }
+
+        /* 2. Audio toggles directly below the minimap */
+        #hudAudioControls {
+          top: calc(108px + env(safe-area-inset-top, 0px)) !important;
+          left: calc(10px + env(safe-area-inset-left, 0px)) !important;
+          bottom: auto !important;
+          gap: 6px !important;
+        }
+
+        #hudAudioControls button {
+          width: 30px !important;
+          height: 30px !important;
+          font-size: 13px !important;
+          padding: 0 !important;
+        }
+
+        /* 3. Compact top-right leaderboard, top 5 only */
+        #leaderboard {
+          top: calc(10px + env(safe-area-inset-top, 0px)) !important;
+          right: calc(10px + env(safe-area-inset-right, 0px)) !important;
+          width: 138px !important;
+          max-width: 42vw !important;
+          padding: 6px 8px !important;
+          border-radius: 8px !important;
+          font-size: 11px !important;
+          line-height: 17px !important;
+          box-sizing: border-box !important;
+        }
+
+        #leaderboard h2 {
+          font-size: 11px !important;
+          margin: 0 0 4px 0 !important;
+        }
+
+        #leaderboard-rows li:nth-child(n + 6) {
+          display: none !important;
+        }
+
+        /* Size/rank panel moves from bottom-right (the dash button's spot) to
+           top-centre, between the minimap and the leaderboard. */
+        #stats {
+          top: calc(10px + env(safe-area-inset-top, 0px)) !important;
+          bottom: auto !important;
+          left: 50% !important;
+          right: auto !important;
+          transform: translateX(-50%) !important;
+          min-width: 0 !important;
+          padding: 5px 9px !important;
+          border-radius: 8px !important;
+          font-size: 11px !important;
+          line-height: 16px !important;
+          white-space: nowrap !important;
+        }
+
+        /* 4. Sleeker bottom-right dash button and touch joystick */
+        #mobileDashBtn {
+          right: calc(16px + env(safe-area-inset-right, 0px)) !important;
+          bottom: calc(18px + env(safe-area-inset-bottom, 0px)) !important;
+          width: 68px !important;
+          height: 68px !important;
+          font-size: 12px !important;
+        }
+
+        #touchJoystick {
+          width: 92px !important;
+          height: 92px !important;
+          margin-left: -46px !important;
+          margin-top: -46px !important;
+        }
+
+        #touchJoystickKnob {
+          width: 34px !important;
+          height: 34px !important;
+          margin-left: -17px !important;
+          margin-top: -17px !important;
+        }
+
+        /* 5. Lobby card and colour popover for narrow screens */
+        #lobby-panel {
+          width: min(92vw, 350px) !important;
+          padding: 18px 16px !important;
+          box-sizing: border-box !important;
+        }
+
+        .color-popover {
+          width: min(88vw, 270px) !important;
+          left: 50% !important;
+          /* Keeps the existing vertical centring as well. */
+          transform: translate(-50%, -50%) !important;
+          box-sizing: border-box !important;
+        }
+
+        #lobbyPreviewCanvas {
+          width: 100% !important;
+          height: auto !important;
+        }
       }
     </style>
   </head>

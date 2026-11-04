@@ -1426,6 +1426,7 @@ const touchJoystickKnob = document.querySelector('#touchJoystickKnob');
 const mobileDashBtn = document.querySelector('#mobileDashBtn');
 
 const JOYSTICK_KNOB_MAX = 38; // px
+const JOYSTICK_KNOB_MAX_SMALL = 30; // px, screens 640px wide or less
 const JOYSTICK_DEADZONE = 6; // px
 const DOUBLE_TAP_MS = 280;
 
@@ -1591,7 +1592,9 @@ canvas.addEventListener(
       const dy = joyCurrentY - joyOriginY;
       const len = Math.hypot(dx, dy);
 
-      const scale = len > JOYSTICK_KNOB_MAX ? JOYSTICK_KNOB_MAX / len : 1;
+      // Shorter travel on phones, matching the smaller 92px ring there.
+      const maxKnob = window.innerWidth <= 640 ? JOYSTICK_KNOB_MAX_SMALL : JOYSTICK_KNOB_MAX;
+      const scale = len > maxKnob ? maxKnob / len : 1;
       touchJoystickKnob.style.transform = `translate(${dx * scale}px, ${dy * scale}px)`;
 
       if (len > JOYSTICK_DEADZONE) {
@@ -1767,7 +1770,13 @@ function placeCamera(me) {
     0,
     (me.radius - CAMERA_REFERENCE_RADIUS) / CAMERA_REFERENCE_RADIUS,
   );
-  const k = Math.min(CAMERA_MAX_SCALE, 1 + growthRatio * CAMERA_GROWTH_DAMPING);
+  const baseK = Math.min(CAMERA_MAX_SCALE, 1 + growthRatio * CAMERA_GROWTH_DAMPING);
+
+  // The perspective camera locks vertical FOV, so a portrait screen sees far
+  // less sideways. Pull back a little to win some of that width back.
+  const aspect = camera.aspect || window.innerWidth / Math.max(1, window.innerHeight);
+  const portraitScale = aspect < 1 ? Math.min(1.42, Math.pow(1 / aspect, 0.42)) : 1;
+  const k = baseK * portraitScale;
 
   camera.position.set(me.x, CAMERA_HEIGHT * k, me.y + CAMERA_BACK * k);
   camera.lookAt(me.x, 0, me.y);
