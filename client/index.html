@@ -40,7 +40,12 @@
         pointer-events: none;
       }
 
-      #nameplates span {
+      /* Size readout next to each name, so sharks can be compared at a glance. */
+      #nameplates .score {
+        color: #ffd94a;
+      }
+
+      #nameplates > span {
         position: absolute;
         transform: translate(-50%, -100%);
         white-space: nowrap;
@@ -268,6 +273,8 @@
 
     <div id="nameplates" class="overlay" aria-hidden="true"></div>
 
+    <canvas id="minimapCanvas" width="150" height="150" style="position:fixed; top:16px; left:16px; width:150px; height:150px; border-radius:10px; background:rgba(4, 28, 48, 0.78); border:2px solid rgba(100, 200, 255, 0.45); box-shadow: 0 4px 14px rgba(0,0,0,0.45); z-index:10; pointer-events:none; display:none;"></canvas>
+
     <div id="leaderboard" hidden>
       <h2>LEADERBOARD</h2>
       <ol id="leaderboard-rows"></ol>
@@ -291,6 +298,10 @@
         <h1>HappyShark<span>.io</span></h1>
 
         <p id="lobby-message" role="status" aria-live="polite"></p>
+
+        <div style="display:flex; justify-content:center; margin: 10px 0;">
+          <canvas id="lobbyPreviewCanvas" width="240" height="150" style="border-radius:12px; background: radial-gradient(circle at 50% 35%, #0e5a8a, #041f36); border: 1px solid rgba(120,210,255,0.25);"></canvas>
+        </div>
 
         <div class="row">
           <div>

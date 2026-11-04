@@ -13,14 +13,12 @@ const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 // rather than scaling it to their viewport, so everyone agrees on coordinates.
 const WORLD = { width: 5000, height: 5000 };
 
-// Score is the real currency; radius is derived from it on a shallow curve:
-// a fresh shark (score 10) is ~21 units and growth flattens out quickly.
+// Score is the real currency; radius is derived from it. The curve rises fast
+// early so growth is obvious, then eases into MAX_RADIUS at SATURATION_SCORE.
 const START_SCORE = 10;
-const BASE_RADIUS = 18;
-const RADIUS_PER_ROOT_SCORE = 1.05;
-
-// Radius stops growing here (around score 4070), so a giant's hitbox stays bounded.
-const MAX_RADIUS = 85;
+const MIN_RADIUS = 16;
+const MAX_RADIUS = 105;
+const SATURATION_SCORE = 1500;
 
 // The walls are lethal now, so spawns keep well clear of them.
 const SPAWN_MARGIN = 250;
@@ -109,8 +107,10 @@ function randomHexColor() {
   return `#${channel()}${channel()}${channel()}`;
 }
 
-function radiusForScore(score) {
-  return Math.min(MAX_RADIUS, BASE_RADIUS + Math.sqrt(score) * RADIUS_PER_ROOT_SCORE);
+function scoreToRadius(score) {
+  const clamped = Math.max(0, Math.min(SATURATION_SCORE, score) - 10);
+  const progress = clamped / (SATURATION_SCORE - 10);
+  return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * Math.pow(progress, 0.52);
 }
 
 /** Shortest signed rotation from `from` to `to`, in (-PI, PI]. */
@@ -127,7 +127,7 @@ function normalizeAngle(angle) {
  * radius and agility can never drift out of sync with it.
  */
 function refreshPlayerSize(player) {
-  player.radius = radiusForScore(player.score);
+  player.radius = scoreToRadius(player.score);
   player.speed = BASE_SPEED;
   player.turnSpeed = Math.max(
     MIN_TURN_SPEED,
@@ -159,7 +159,7 @@ function createPlayer(id, name, color) {
     x: randomBetween(SPAWN_MARGIN, WORLD.width - SPAWN_MARGIN),
     y: randomBetween(SPAWN_MARGIN, WORLD.height - SPAWN_MARGIN),
     score: START_SCORE,
-    radius: BASE_RADIUS,
+    radius: scoreToRadius(START_SCORE),
     speed: BASE_SPEED,
     turnSpeed: BASE_TURN_SPEED,
     // Where the mouse points, and where the body has actually swung to.
@@ -347,8 +347,8 @@ function checkSharkCollision(A, B) {
 
   // Account for B's core body thickness (~0.45 of B's radius)
   const pad = B.radius * 0.45;
-  const rx = A.radius * 0.95 + pad; // snout-to-tail reach
-  const ry = A.radius * 0.42 + pad; // flank width reach
+  const rx = A.radius * 1.05 + pad; // snout-to-tail reach
+  const ry = A.radius * 0.52 + pad; // flank width reach
 
   return (localX * localX) / (rx * rx) + (localY * localY) / (ry * ry) <= 1.0;
 }
@@ -544,7 +544,7 @@ httpServer.listen(PORT, () => {
   console.log(`Walls are lethal | bump drain ${BUMP_DRAIN_PER_SECOND * 100}%/s`);
   console.log(
     `Speed ${BASE_SPEED} for all | turn ${BASE_TURN_SPEED}..${MIN_TURN_SPEED} rad/s | ` +
-      `radius caps at ${MAX_RADIUS}`,
+      `radius ${MIN_RADIUS}..${MAX_RADIUS} (caps at score ${SATURATION_SCORE})`,
   );
   console.log(`Accepting browser clients from ${CLIENT_ORIGIN}`);
 });

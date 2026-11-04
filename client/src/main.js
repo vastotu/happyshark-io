@@ -19,18 +19,31 @@ const CAMERA_BACK = 280;
 const CAMERA_FOV = 50;
 
 // Pull-back per unit of growth past the reference radius, and its ceiling.
-const CAMERA_GROWTH_DAMPING = 0.35;
-const CAMERA_MAX_PULLBACK = 1.8;
+const CAMERA_GROWTH_DAMPING = 0.22;
+const CAMERA_MAX_SCALE = 1.85;
 
 // --- World ------------------------------------------------------------------
-const VOID_COLOR = 0x060f1e; // beyond the arena
-const WATER_COLOR = 0x11325c; // the arena floor
-const GRID_COLOR = 0x2d5a8f;
-const WALL_COLOR = 0xff4d5e; // lethal, so it reads as a hazard
-const WALL_HEIGHT = 54;
-const WALL_THICKNESS = 16;
+const VOID_COLOR = 0x041e34; // deep ocean abyss, beyond the arena
+const FLOOR_COLOR = 0x073b5e; // rich marine blue
+const GRID_COLOR = 0x136da3; // aqua grid lines
+const WALL_COLOR = 0xff2244; // lethal, so it reads as a hazard
+// The border is a flat, thick red line on the floor rather than a tall wall.
+const WALL_HEIGHT = 2;
+const WALL_THICKNESS = 24;
 const GRID_DIVISIONS = 20;
 const FOOD_HEIGHT = 7;
+
+// Sharks float this many radii above the floor. The plump body hangs about
+// 0.49 radii below its centre, so this keeps the belly off the water.
+const SHARK_FLOAT = 0.55;
+
+// Rising ambient bubbles, all drawn by one InstancedMesh.
+const BUBBLE_COUNT = 160;
+const BUBBLE_MIN_Y = 5;
+const BUBBLE_MAX_Y = 240;
+
+// Minimap backing size, in canvas pixels.
+const MINIMAP_SIZE = 150;
 
 // A shark under the starting score is visibly frail: its radius is clamped up
 // to MIN_RADIUS so it looks full size, and without this cue being eaten by
@@ -77,12 +90,12 @@ scene.fog = new THREE.Fog(VOID_COLOR, 2200, 9000);
 
 const camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 1, 30000);
 
-scene.add(new THREE.AmbientLight(0x8fa8c8, 1.5));
+scene.add(new THREE.AmbientLight(0x8be0ff, 1.5));
 
 // Directional lights are infinitely distant, so only the direction matters:
 // this one rakes across the water and gives the shark bodies a lit top and a
 // shaded flank, which is what sells the 2.5D depth.
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+const sun = new THREE.DirectionalLight(0xfff7e8, 2.3);
 sun.position.set(0.45, 1, 0.3);
 scene.add(sun);
 
@@ -131,7 +144,7 @@ function buildArena() {
 
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(world.width, world.height),
-    new THREE.MeshStandardMaterial({ color: WATER_COLOR, roughness: 0.95, metalness: 0 }),
+    new THREE.MeshStandardMaterial({ color: FLOOR_COLOR, roughness: 0.85, metalness: 0 }),
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.set(world.width / 2, 0, world.height / 2);
@@ -150,13 +163,9 @@ function buildArena() {
   grid.material.opacity = 0.5;
   arena.add(grid);
 
-  // Four low walls rather than a flat line, so the lethal boundary has real
-  // thickness and catches the light.
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: WALL_COLOR,
-    roughness: 0.5,
-    emissive: new THREE.Color(WALL_COLOR).multiplyScalar(0.25),
-  });
+  // Four flat strips. Unlit, so the lethal boundary is the same crisp red
+  // whatever the lighting does.
+  const wallMaterial = new THREE.MeshBasicMaterial({ color: WALL_COLOR });
 
   const spans = [
     { w: world.width + WALL_THICKNESS * 2, d: WALL_THICKNESS, x: world.width / 2, z: 0 },
@@ -167,7 +176,7 @@ function buildArena() {
 
   for (const span of spans) {
     const wall = new THREE.Mesh(new THREE.BoxGeometry(span.w, WALL_HEIGHT, span.d), wallMaterial);
-    wall.position.set(span.x, WALL_HEIGHT / 2, span.z);
+    wall.position.set(span.x, 1.0, span.z);
     arena.add(wall);
   }
 }
@@ -234,29 +243,80 @@ function addPellet(_pellet) {}
 function removePellet(_id) {}
 function clearFood() {}
 
+// --- Bubbles ----------------------------------------------------------------
+
+const bubbleGeo = new THREE.SphereGeometry(1, 10, 8);
+const bubbleMat = new THREE.MeshBasicMaterial({
+  color: 0xb8f2ff,
+  transparent: true,
+  opacity: 0.28,
+  depthWrite: false,
+});
+const bubbleInstancedMesh = new THREE.InstancedMesh(bubbleGeo, bubbleMat, BUBBLE_COUNT);
+bubbleInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+bubbleInstancedMesh.frustumCulled = false;
+scene.add(bubbleInstancedMesh);
+
+const bubbles = Array.from({ length: BUBBLE_COUNT }, () => ({
+  x: randomBetween(0, world.width),
+  y: randomBetween(BUBBLE_MIN_Y, BUBBLE_MAX_Y),
+  z: randomBetween(0, world.height),
+  speed: randomBetween(12, 40),
+  size: randomBetween(2, 6),
+  phase: Math.random() * Math.PI * 2,
+}));
+
+const _bubbleMatrix = new THREE.Matrix4();
+
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function updateBubbles(now, dt) {
+  for (let i = 0; i < BUBBLE_COUNT; i++) {
+    const b = bubbles[i];
+    b.y += b.speed * dt;
+    if (b.y > BUBBLE_MAX_Y) b.y = BUBBLE_MIN_Y;
+
+    const wobble = Math.sin(now * 0.002 + b.phase) * 6;
+    _bubbleMatrix.makeScale(b.size, b.size, b.size);
+    _bubbleMatrix.setPosition(b.x + wobble, b.y, b.z);
+    bubbleInstancedMesh.setMatrixAt(i, _bubbleMatrix);
+  }
+
+  bubbleInstancedMesh.instanceMatrix.needsUpdate = true;
+}
+
 // --- Sharks -----------------------------------------------------------------
 
-// Authored in units of the authoritative radius: the snout sits at x = 1 and
-// the tail tip reaches x = -1, so scaling the group by `radius` makes the model
-// fill its collision circle exactly.
-const bodyGeometry = new THREE.SphereGeometry(1, 22, 16);
-bodyGeometry.scale(0.6, 0.3, 0.4);
+// Authored in units of the authoritative radius with the snout along +X, so
+// scaling the group by `radius` sizes the model to its hitbox. Geometries are
+// shared by every shark, including the lobby preview.
+const bodyGeometry = new THREE.SphereGeometry(1, 32, 24);
+bodyGeometry.scale(0.72, 0.48, 0.52); // plump, smooth chubby body
 
-const headGeometry = new THREE.ConeGeometry(0.38, 0.52, 20);
-const dorsalGeometry = new THREE.ConeGeometry(0.15, 0.32, 4);
-dorsalGeometry.scale(1, 1, 0.35);
+const snoutGeometry = new THREE.SphereGeometry(1, 24, 18);
+snoutGeometry.scale(0.45, 0.36, 0.44); // rounded cute nose
 
-const pectoralGeometry = new THREE.ConeGeometry(0.22, 0.46, 4);
-pectoralGeometry.scale(1, 1, 0.16); // flatten into a blade
+const bellyGeometry = new THREE.SphereGeometry(1, 28, 20);
+bellyGeometry.scale(0.64, 0.34, 0.46); // soft cream belly
 
-const flukeGeometry = new THREE.ConeGeometry(0.3, 0.37, 4);
-flukeGeometry.scale(0.16, 1, 1); // flatten into a horizontal blade
+const dorsalGeometry = new THREE.ConeGeometry(0.24, 0.52, 20);
+dorsalGeometry.scale(1.15, 1, 0.28); // smooth rounded dorsal fin
 
-const caudalGeometry = new THREE.ConeGeometry(0.12, 0.26, 4);
-caudalGeometry.scale(1, 1, 0.3);
+const pectoralGeometry = new THREE.SphereGeometry(1, 18, 14);
+pectoralGeometry.scale(0.22, 0.07, 0.42); // smooth paddle fin
 
-const eyeGeometry = new THREE.SphereGeometry(0.055, 8, 6);
-const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x0a1424, roughness: 0.3 });
+const peduncleGeometry = new THREE.SphereGeometry(1, 20, 16);
+peduncleGeometry.scale(0.36, 0.22, 0.24);
+
+const flukeGeometry = new THREE.SphereGeometry(1, 18, 14);
+flukeGeometry.scale(0.18, 0.42, 0.08); // smooth rounded tail fin lobes
+
+const eyeGeometry = new THREE.SphereGeometry(0.105, 16, 14);
+const pupilHighlightGeometry = new THREE.SphereGeometry(0.042, 12, 10);
+const blushGeometry = new THREE.SphereGeometry(0.08, 12, 10);
+blushGeometry.scale(0.9, 0.55, 0.35);
 
 const sharks = new Map();
 
@@ -265,76 +325,109 @@ const sharks = new Map();
  * swung without touching the body, and every material is owned by this shark
  * so colour and opacity can be set per player.
  */
-function createShark(player) {
+function buildSharkRig(colorHex) {
   const group = new THREE.Group();
 
   const skin = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(player.color),
-    roughness: 0.5,
-    metalness: 0.1,
+    color: new THREE.Color(colorHex),
+    roughness: 0.38,
+    metalness: 0.05,
   });
-  const belly = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(player.color).multiplyScalar(0.62),
-    roughness: 0.6,
-  });
+  const bellyMat = new THREE.MeshStandardMaterial({ color: 0xf4f9ff, roughness: 0.5 });
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x111622, roughness: 0.1 });
+  const highlightMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const blushMat = new THREE.MeshBasicMaterial({ color: 0xff8da6 });
 
   const body = new THREE.Mesh(bodyGeometry, skin);
-  body.position.x = -0.05;
   group.add(body);
 
-  // Cones point +Y by default; -90 degrees about Z aims the snout along +X.
-  const head = new THREE.Mesh(headGeometry, skin);
-  head.rotation.z = -Math.PI / 2;
-  head.position.x = 0.74;
-  group.add(head);
+  const snout = new THREE.Mesh(snoutGeometry, skin);
+  snout.position.set(0.36, -0.02, 0);
+  group.add(snout);
 
-  const dorsal = new THREE.Mesh(dorsalGeometry, belly);
-  dorsal.position.set(-0.1, 0.24, 0);
-  dorsal.rotation.z = 0.3; // leans back
+  const belly = new THREE.Mesh(bellyGeometry, bellyMat);
+  belly.position.set(0.06, -0.15, 0);
+  group.add(belly);
+
+  const dorsal = new THREE.Mesh(dorsalGeometry, skin);
+  dorsal.position.set(-0.04, 0.48, 0);
+  dorsal.rotation.z = 0.28; // leans back
   group.add(dorsal);
 
-  // Pectoral fins: a pivot carries the sweep, the blade points outward.
   for (const side of [1, -1]) {
+    // Pectoral fins: a pivot carries the sweep, the paddle points outward.
     const pivot = new THREE.Group();
-    pivot.position.set(0.06, -0.03, side * 0.2);
-    pivot.rotation.y = -0.55 * side;
+    pivot.position.set(0.08, -0.14, side * 0.34);
+    pivot.rotation.y = -0.35 * side;
+    pivot.rotation.x = 0.25 * side;
 
-    const fin = new THREE.Mesh(pectoralGeometry, belly);
-    fin.rotation.x = (Math.PI / 2) * side;
-    fin.position.z = side * 0.23;
+    const fin = new THREE.Mesh(pectoralGeometry, skin);
+    fin.position.set(0, 0, side * 0.22);
     pivot.add(fin);
     group.add(pivot);
-  }
 
-  for (const side of [1, -1]) {
-    const eye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-    eye.position.set(0.56, 0.07, side * 0.13);
+    const eye = new THREE.Mesh(eyeGeometry, eyeMat);
+    eye.position.set(0.48, 0.12, side * 0.37);
     group.add(eye);
+
+    const highlight = new THREE.Mesh(pupilHighlightGeometry, highlightMat);
+    highlight.position.set(0.56, 0.16, side * 0.4);
+    group.add(highlight);
+
+    const blush = new THREE.Mesh(blushGeometry, blushMat);
+    blush.position.set(0.38, -0.03, side * 0.44);
+    group.add(blush);
   }
 
   // Tail pivot at the back of the body: rotating this about Y is the wag.
   const tail = new THREE.Group();
-  tail.position.x = -0.63;
+  tail.position.x = -0.58;
 
-  const fluke = new THREE.Mesh(flukeGeometry, skin);
-  fluke.rotation.z = Math.PI / 2; // length now runs along -X, blade horizontal
-  fluke.position.x = -0.185;
-  tail.add(fluke);
+  const peduncle = new THREE.Mesh(peduncleGeometry, skin);
+  peduncle.position.set(-0.12, 0, 0);
+  tail.add(peduncle);
 
-  const caudal = new THREE.Mesh(caudalGeometry, belly);
-  caudal.position.set(-0.08, 0.1, 0);
-  caudal.rotation.z = 0.35;
-  tail.add(caudal);
+  const upperFluke = new THREE.Mesh(flukeGeometry, skin);
+  upperFluke.position.set(-0.34, 0.22, 0);
+  upperFluke.rotation.z = 0.48;
+  tail.add(upperFluke);
+
+  const lowerFluke = new THREE.Mesh(flukeGeometry, skin);
+  lowerFluke.position.set(-0.32, -0.18, 0);
+  lowerFluke.rotation.z = -0.52;
+  tail.add(lowerFluke);
 
   group.add(tail);
 
-  scene.add(group);
+  return {
+    group,
+    tail,
+    skinMaterial: skin,
+    materials: [skin, bellyMat, eyeMat, highlightMat, blushMat],
+  };
+}
 
+function createShark(player) {
+  const rig = buildSharkRig(player.color);
+  scene.add(rig.group);
+
+  // Nameplate reads "Name [size]": white name, gold size.
   const plate = document.createElement('span');
-  plate.textContent = player.name ?? 'Shark';
+  const plateName = document.createElement('span');
+  const plateScore = document.createElement('span');
+  plateScore.className = 'score';
+  plate.append(plateName, ' ', plateScore);
   nameplateLayer.append(plate);
 
-  return { group, tail, materials: [skin, belly], plate, weak: null };
+  return {
+    ...rig,
+    plate,
+    plateName,
+    plateScore,
+    lastDisplayedName: null,
+    lastDisplayedScore: null,
+    weak: null,
+  };
 }
 
 function removeShark(id) {
@@ -349,6 +442,100 @@ function removeShark(id) {
 
 function clearSharks() {
   for (const id of [...sharks.keys()]) removeShark(id);
+}
+
+// --- Lobby preview ----------------------------------------------------------
+
+// A second, tiny renderer that shows the player's shark in their chosen colour.
+const previewCanvas = document.querySelector('#lobbyPreviewCanvas');
+const previewRenderer = new THREE.WebGLRenderer({
+  canvas: previewCanvas,
+  alpha: true,
+  antialias: true,
+});
+previewRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+previewRenderer.setSize(240, 150, false);
+previewRenderer.setClearColor(0x000000, 0);
+
+const previewScene = new THREE.Scene();
+const previewCamera = new THREE.PerspectiveCamera(38, 240 / 150, 0.1, 100);
+previewCamera.position.set(0, 0.45, 3.2);
+previewCamera.lookAt(0, 0, 0);
+
+previewScene.add(new THREE.AmbientLight(0x8be0ff, 1.4));
+const previewSun = new THREE.DirectionalLight(0xfff7e8, 2.3);
+previewSun.position.set(2, 3, 2);
+previewScene.add(previewSun);
+
+const previewShark = buildSharkRig(colorInput.value);
+previewScene.add(previewShark.group);
+
+colorInput.addEventListener('input', () => {
+  previewShark.skinMaterial.color.set(colorInput.value);
+});
+
+function renderLobbyPreview(now) {
+  previewShark.group.rotation.y = Math.sin(now * 0.0012) * 0.45 - 0.6;
+  previewShark.group.position.y = Math.sin(now * 0.003) * 0.08;
+  previewShark.tail.rotation.y = Math.sin(now * 0.012) * 0.45;
+  previewRenderer.render(previewScene, previewCamera);
+}
+
+// --- Minimap ----------------------------------------------------------------
+
+const minimapCanvas = document.querySelector('#minimapCanvas');
+const minimapCtx = minimapCanvas.getContext('2d');
+let minimapVisible = false;
+
+function setMinimapVisible(visible) {
+  if (minimapVisible === visible) return;
+  minimapVisible = visible;
+  minimapCanvas.style.display = visible ? 'block' : 'none';
+}
+
+function drawMinimap(now) {
+  const size = MINIMAP_SIZE;
+  const half = size / 2;
+  minimapCtx.clearRect(0, 0, size, size);
+
+  minimapCtx.strokeStyle = 'rgba(140, 210, 255, 0.18)';
+  minimapCtx.lineWidth = 1;
+  minimapCtx.beginPath();
+  minimapCtx.moveTo(half, 0);
+  minimapCtx.lineTo(half, size);
+  minimapCtx.moveTo(0, half);
+  minimapCtx.lineTo(size, half);
+  minimapCtx.stroke();
+
+  let me = null;
+
+  minimapCtx.fillStyle = '#ffffff';
+  for (const p of Object.values(localGameState.players)) {
+    if (p.id === myId) {
+      me = p;
+      continue;
+    }
+    minimapCtx.beginPath();
+    minimapCtx.arc((p.x / world.width) * size, (p.y / world.height) * size, 2.5, 0, Math.PI * 2);
+    minimapCtx.fill();
+  }
+
+  // Drawn last so other dots never cover it.
+  if (me) {
+    const mx = (me.x / world.width) * size;
+    const my = (me.y / world.height) * size;
+    const pulse = 6.5 + Math.sin(now * 0.006) * 1.2;
+
+    minimapCtx.fillStyle = 'rgba(255, 60, 90, 0.45)';
+    minimapCtx.beginPath();
+    minimapCtx.arc(mx, my, pulse, 0, Math.PI * 2);
+    minimapCtx.fill();
+
+    minimapCtx.fillStyle = '#ff2a4b';
+    minimapCtx.beginPath();
+    minimapCtx.arc(mx, my, 4, 0, Math.PI * 2);
+    minimapCtx.fill();
+  }
 }
 
 // --- Game state -------------------------------------------------------------
@@ -655,7 +842,7 @@ function updateSharks(now) {
     }
 
     // Float the body just clear of the water so it never z-fights the floor.
-    shark.group.position.set(player.x, player.radius * 0.42, player.y);
+    shark.group.position.set(player.x, player.radius * SHARK_FLOAT, player.y);
     shark.group.scale.setScalar(player.radius);
 
     // A group rotated by -angle about Y sends its local +X, the snout, along
@@ -688,7 +875,18 @@ function updateNameplates() {
     const shark = sharks.get(player.id);
     if (!shark) continue;
 
-    if (shark.plate.textContent !== player.name) shark.plate.textContent = player.name;
+    // Only touch the DOM when the shown text would actually change.
+    const name = player.name ?? 'Shark';
+    if (name !== shark.lastDisplayedName) {
+      shark.lastDisplayedName = name;
+      shark.plateName.textContent = name;
+    }
+
+    const score = Math.floor(player.score);
+    if (score !== shark.lastDisplayedScore) {
+      shark.lastDisplayedScore = score;
+      shark.plateScore.textContent = `[${score}]`;
+    }
 
     projected.set(player.x, player.radius * 1.5, player.y).project(camera);
 
@@ -717,7 +915,7 @@ function placeCamera(me) {
     0,
     (me.radius - CAMERA_REFERENCE_RADIUS) / CAMERA_REFERENCE_RADIUS,
   );
-  const k = Math.min(CAMERA_MAX_PULLBACK, 1 + growthRatio * CAMERA_GROWTH_DAMPING);
+  const k = Math.min(CAMERA_MAX_SCALE, 1 + growthRatio * CAMERA_GROWTH_DAMPING);
 
   camera.position.set(me.x, CAMERA_HEIGHT * k, me.y + CAMERA_BACK * k);
   camera.lookAt(me.x, 0, me.y);
@@ -802,8 +1000,13 @@ function endCinematic() {
   showLobby(message);
 }
 
+let lastFrameAt = performance.now();
+
 function frame() {
   const now = performance.now();
+  // Capped so a backgrounded tab doesn't launch every bubble at once.
+  const dt = Math.min(0.1, (now - lastFrameAt) / 1000);
+  lastFrameAt = now;
   const me = playing ? localGameState.players[myId] : null;
 
   if (me || gameOver) {
@@ -814,16 +1017,22 @@ function frame() {
   // Rebuild the food InstancedMesh every frame so additions and removals are
   // always reflected without per-pellet bookkeeping.
   syncFoodInstances();
+  updateBubbles(now, dt);
 
   if (me) {
     placeCamera(renderState.players[myId]);
     updateHud(renderState.players[myId]);
+    setMinimapVisible(true);
+    drawMinimap(now);
   } else {
     restoreCamera();
+    setMinimapVisible(false);
   }
 
   updateNameplates();
   renderer.render(scene, camera);
+
+  if (!lobby.hidden) renderLobbyPreview(now);
 
   if (gameOver) {
     const elapsed = now - gameOver.diedAt;
@@ -856,7 +1065,7 @@ if (import.meta.env.DEV) {
       CAMERA_HEIGHT,
       CAMERA_BACK,
       CAMERA_GROWTH_DAMPING,
-      CAMERA_MAX_PULLBACK,
+      CAMERA_MAX_SCALE,
       WEAK_SCORE,
       WEAK_OPACITY,
       WAG_FREQUENCY,
