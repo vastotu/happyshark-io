@@ -11,19 +11,16 @@ const INPUT_HZ = 30;
 const LERP_AMOUNT = 0.3;
 
 // --- Camera -----------------------------------------------------------------
-// The camera sits back and above, and its offset scales with the shark so a
-// shark of any size keeps roughly the same apparent size. These values put a
-// fresh radius-20 shark at about the same screen footprint the old 2D view gave
-// it, and the whole rig is a straight port of `zoom = 20 / radius`.
+// The camera sits back and above. It pulls back only slightly as the shark
+// grows, so a big shark looks big and never gets a god-view of the arena.
 const CAMERA_REFERENCE_RADIUS = 20;
 const CAMERA_HEIGHT = 280;
 const CAMERA_BACK = 280;
 const CAMERA_FOV = 50;
 
-// Floor on how far the camera may pull back, equivalent to zoom 0.2 in the old
-// 2D projection. Without it a capped giant shrank the whole arena to a speck.
-const MIN_ZOOM = 0.3;
-const MAX_FRAMED_RADIUS = CAMERA_REFERENCE_RADIUS / MIN_ZOOM;
+// Pull-back per unit of growth past the reference radius, and its ceiling.
+const CAMERA_GROWTH_DAMPING = 0.35;
+const CAMERA_MAX_PULLBACK = 1.8;
 
 // --- World ------------------------------------------------------------------
 const VOID_COLOR = 0x060f1e; // beyond the arena
@@ -117,7 +114,7 @@ window.addEventListener('resize', resize);
  * Server coordinates are a 2D plane; Three.js uses the horizontal XZ plane for
  * it, so server (x, y) maps to (x, 0, y) and height is free for the 2.5D look.
  */
-let world = { width: 3000, height: 3000 };
+let world = { width: 5000, height: 5000 };
 let foodRadius = 5;
 
 const arena = new THREE.Group();
@@ -181,7 +178,8 @@ buildArena();
 
 // A single InstancedMesh replaces hundreds of individual Mesh objects, dropping
 // food draw calls to 1. Capacity is pre-allocated; `count` tracks live pellets.
-const FOOD_INSTANCE_CAPACITY = 1000;
+// Matches the server's FOOD_HARD_CAP so no pellet goes unrendered.
+const FOOD_INSTANCE_CAPACITY = 1500;
 const pelletGeometry = new THREE.SphereGeometry(1, 8, 6);
 const pelletMaterial = new THREE.MeshStandardMaterial({
   roughness: 0.4,
@@ -260,17 +258,6 @@ caudalGeometry.scale(1, 1, 0.3);
 const eyeGeometry = new THREE.SphereGeometry(0.055, 8, 6);
 const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x0a1424, roughness: 0.3 });
 
-// Drop shadow geometry shared across all sharks. Placed at Y just above the
-// arena floor so it reads as a contact shadow and never z-fights.
-const shadowGeometry = new THREE.CircleGeometry(1, 24);
-shadowGeometry.rotateX(-Math.PI / 2);
-const shadowMaterial = new THREE.MeshBasicMaterial({
-  color: 0x000000,
-  transparent: true,
-  opacity: 0.4,
-  depthWrite: false,
-});
-
 const sharks = new Map();
 
 /**
@@ -341,18 +328,13 @@ function createShark(player) {
 
   group.add(tail);
 
-  // Drop shadow: a dark circle on the arena floor to ground the floating shark.
-  const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
-  shadow.renderOrder = -1;
-  group.add(shadow);
-
   scene.add(group);
 
   const plate = document.createElement('span');
   plate.textContent = player.name ?? 'Shark';
   nameplateLayer.append(plate);
 
-  return { group, tail, shadow, materials: [skin, belly], plate, weak: null };
+  return { group, tail, materials: [skin, belly], plate, weak: null };
 }
 
 function removeShark(id) {
@@ -474,6 +456,7 @@ socket.on('gameOver', (info) => {
   // Stop sending input but stay connected and keep rendering: the cinematic
   // plays over the live arena, and the lobby only returns once it finishes.
   playing = false;
+  resetDash();
   gameOver = { ...info, diedAt: performance.now() };
 
   gameoverCause.textContent =
@@ -490,6 +473,7 @@ socket.on('disconnect', (reason) => {
   console.log(`[socket] disconnected: ${reason}`);
 
   playing = false;
+  resetDash();
   playButton.disabled = true;
 
   // The cinematic closes the session itself and has already put the lobby up.
@@ -559,23 +543,57 @@ setInterval(() => {
   pointerMoved = false;
 }, 1000 / INPUT_HZ);
 
-function requestDash() {
-  if (!playing) return;
-  socket.emit('dash');
+// Dash is held, not tapped. Space and the left mouse button are tracked
+// separately so releasing one while the other is still down keeps dashing.
+const dashHeld = { key: false, mouse: false };
+let isDashing = false;
+
+/** Tells the server only when the combined dash state actually flips. */
+function updateDash() {
+  const next = playing && (dashHeld.key || dashHeld.mouse);
+  if (next === isDashing) return;
+
+  isDashing = next;
+  socket.emit('dash', { active: next });
+}
+
+function resetDash() {
+  dashHeld.key = false;
+  dashHeld.mouse = false;
+  updateDash();
 }
 
 window.addEventListener('keydown', (event) => {
-  if (event.code !== 'Space' || event.repeat) return;
   // While the lobby is up, space belongs to the nickname field.
-  if (!playing) return;
+  if (event.code !== 'Space' || !playing) return;
 
+  // Still swallow key-repeat so the page never scrolls; updateDash dedupes.
   event.preventDefault();
-  requestDash();
+  dashHeld.key = true;
+  updateDash();
+});
+
+window.addEventListener('keyup', (event) => {
+  if (event.code !== 'Space') return;
+  dashHeld.key = false;
+  updateDash();
 });
 
 window.addEventListener('mousedown', (event) => {
-  if (event.button === 0) requestDash();
+  if (event.button !== 0 || !playing) return;
+  dashHeld.mouse = true;
+  updateDash();
 });
+
+window.addEventListener('mouseup', (event) => {
+  if (event.button !== 0) return;
+  dashHeld.mouse = false;
+  updateDash();
+});
+
+// A key or button released while the window is unfocused never fires its up
+// event, which would leave the shark dashing until it starved.
+window.addEventListener('blur', resetDash);
 
 // --- Smoothing --------------------------------------------------------------
 
@@ -640,11 +658,6 @@ function updateSharks(now) {
     shark.group.position.set(player.x, player.radius * 0.42, player.y);
     shark.group.scale.setScalar(player.radius);
 
-    // Position the drop shadow so it sits at world Y ≈ 1 (just above the arena
-    // floor) regardless of how high the group itself floats. In local space the
-    // group is at Y = radius * 0.42, so the shadow needs to cancel that offset.
-    shark.shadow.position.y = (1 - player.radius * 0.42) / player.radius;
-
     // A group rotated by -angle about Y sends its local +X, the snout, along
     // (cos angle, 0, sin angle), which is the server's heading vector.
     shark.group.rotation.y = -player.angle;
@@ -700,10 +713,11 @@ function updateNameplates() {
 }
 
 function placeCamera(me) {
-  // Clamping the framed radius is the zoom floor: past this size the camera
-  // stops retreating and a giant simply looks giant.
-  const framed = Math.min(me.radius, MAX_FRAMED_RADIUS);
-  const k = framed / CAMERA_REFERENCE_RADIUS;
+  const growthRatio = Math.max(
+    0,
+    (me.radius - CAMERA_REFERENCE_RADIUS) / CAMERA_REFERENCE_RADIUS,
+  );
+  const k = Math.min(CAMERA_MAX_PULLBACK, 1 + growthRatio * CAMERA_GROWTH_DAMPING);
 
   camera.position.set(me.x, CAMERA_HEIGHT * k, me.y + CAMERA_BACK * k);
   camera.lookAt(me.x, 0, me.y);
@@ -841,8 +855,8 @@ if (import.meta.env.DEV) {
       CAMERA_REFERENCE_RADIUS,
       CAMERA_HEIGHT,
       CAMERA_BACK,
-      MIN_ZOOM,
-      MAX_FRAMED_RADIUS,
+      CAMERA_GROWTH_DAMPING,
+      CAMERA_MAX_PULLBACK,
       WEAK_SCORE,
       WEAK_OPACITY,
       WAG_FREQUENCY,

@@ -11,19 +11,16 @@ const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 
 // Fixed arena shared by every player. Clients render a camera window onto it
 // rather than scaling it to their viewport, so everyone agrees on coordinates.
-const WORLD = { width: 3000, height: 3000 };
+const WORLD = { width: 5000, height: 5000 };
 
-// Score is the real currency; radius is derived from it so that area, not
-// radius, grows linearly with food eaten. sqrt(10) * 6.32 ~= 20, which puts a
-// fresh shark exactly at MIN_RADIUS.
+// Score is the real currency; radius is derived from it on a shallow curve:
+// a fresh shark (score 10) is ~21 units and growth flattens out quickly.
 const START_SCORE = 10;
-const MIN_RADIUS = 20;
-const RADIUS_PER_ROOT_SCORE = 6.32;
+const BASE_RADIUS = 18;
+const RADIUS_PER_ROOT_SCORE = 1.05;
 
-// Radius stops growing past this score, so a giant can no longer shrink the
-// whole arena to nothing through the camera, and its hitbox stays bounded.
-const MAX_SCORE_FOR_RADIUS = 5000;
-const MAX_RADIUS = Math.sqrt(MAX_SCORE_FOR_RADIUS) * RADIUS_PER_ROOT_SCORE;
+// Radius stops growing here (around score 4070), so a giant's hitbox stays bounded.
+const MAX_RADIUS = 85;
 
 // The walls are lethal now, so spawns keep well clear of them.
 const SPAWN_MARGIN = 250;
@@ -36,14 +33,14 @@ const BASE_TURN_SPEED = 6.0; // radians per second at zero radius
 const MIN_TURN_SPEED = 1.0;
 const TURN_RADIUS_DIVISOR = 50;
 
-// Dash trades mass for a burst of speed, giving small sharks an escape and big
-// ones a way to close a gap.
-const DASH_MIN_SCORE = 20;
-const DASH_SCORE_COST = 5;
-const DASH_DURATION = 1.0; // seconds
+// Holding dash burns mass continuously for a burst of speed, giving small
+// sharks an escape and big ones a way to close a gap. It cuts out once the
+// shark is down to MIN_DASH_SCORE.
+const MIN_DASH_SCORE = 10;
+const DASH_COST_PER_SEC = 5;
 const DASH_MULTIPLIER = 1.5;
 
-const MAX_FOOD = 500;
+const MAX_FOOD = 800;
 const FOOD_RADIUS = 5;
 const FOOD_SCORE = 1;
 
@@ -56,12 +53,11 @@ const FOOD_MARGIN = 150;
 // Death and bump drops push the pool above MAX_FOOD, which the top-up logic
 // then treats as a floor. This keeps a burst of deaths from ballooning the
 // broadcast payload.
-const FOOD_HARD_CAP = 1200;
+const FOOD_HARD_CAP = 1500;
 
-// Eating is judged on score, not radius. Radius is clamped at both ends now
-// (MIN_RADIUS below score 10, MAX_RADIUS above 5000), so it stops being a
-// faithful measure of who is bigger. Below the clamps the two are identical:
-// radius scales with sqrt(score), so a 1.15x radius edge is a 1.15^2 score edge.
+// Eating is judged on score, not radius. Radius is offset and capped at
+// MAX_RADIUS, so it is not a faithful measure of who is bigger. A predator
+// needs about 32% more mass than its prey.
 const EAT_RATIO_SCORE = 1.15 ** 2;
 
 // Two sharks too evenly matched to eat each other grind mass off one another,
@@ -114,7 +110,7 @@ function randomHexColor() {
 }
 
 function radiusForScore(score) {
-  return Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, Math.sqrt(score) * RADIUS_PER_ROOT_SCORE));
+  return Math.min(MAX_RADIUS, BASE_RADIUS + Math.sqrt(score) * RADIUS_PER_ROOT_SCORE);
 }
 
 /** Shortest signed rotation from `from` to `to`, in (-PI, PI]. */
@@ -163,14 +159,16 @@ function createPlayer(id, name, color) {
     x: randomBetween(SPAWN_MARGIN, WORLD.width - SPAWN_MARGIN),
     y: randomBetween(SPAWN_MARGIN, WORLD.height - SPAWN_MARGIN),
     score: START_SCORE,
-    radius: MIN_RADIUS,
+    radius: BASE_RADIUS,
     speed: BASE_SPEED,
     turnSpeed: BASE_TURN_SPEED,
     // Where the mouse points, and where the body has actually swung to.
     // Aim at the middle of the arena so a fresh shark isn't pointed at a wall.
     targetAngle: 0,
     angle: 0,
-    // Seconds of dash boost remaining. Shipped to clients so they can show it.
+    // Whether the dash button is held. dashTimer mirrors it as 1/0 so clients
+    // can keep keying the fast tail wag off `dashTimer > 0`.
+    isDashing: false,
     dashTimer: 0,
   };
 
@@ -335,6 +333,27 @@ function grindBump(a, b, deltaTime) {
 }
 
 /**
+ * Whether B touches A's elliptical body. The rendered shark is long and narrow,
+ * so a circular hitbox made contact on the empty water beside its flanks.
+ */
+function checkSharkCollision(A, B) {
+  // Check if B touches A's elliptical body (length = A.radius, width = A.radius * 0.45)
+  const dx = B.x - A.x;
+  const dy = B.y - A.y;
+  const cos = Math.cos(-A.angle);
+  const sin = Math.sin(-A.angle);
+  const localX = dx * cos - dy * sin;
+  const localY = dx * sin + dy * cos;
+
+  // Account for B's core body thickness (~0.45 of B's radius)
+  const pad = B.radius * 0.45;
+  const rx = A.radius * 0.95 + pad; // snout-to-tail reach
+  const ry = A.radius * 0.42 + pad; // flank width reach
+
+  return (localX * localX) / (rx * rx) + (localY * localY) / (ry * ry) <= 1.0;
+}
+
+/**
  * Resolves shark-vs-shark overlaps. O(N^2) over pairs, which is fine at this
  * player count. Eating is checked before draining, so a bump that pushes one
  * side under the 15% threshold resolves as a kill on the following tick.
@@ -350,8 +369,7 @@ function resolvePlayerCollisions(deltaTime) {
       // Either side may already have been removed earlier in this pass.
       if (!a || !b) continue;
 
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (d >= a.radius + b.radius) continue;
+      if (!checkSharkCollision(a, b) && !checkSharkCollision(b, a)) continue;
 
       // Judged on score, so the verdict still works when either radius is
       // sitting on a clamp. The test is asymmetric, so at most one can hold.
@@ -427,17 +445,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('dash', () => {
+  // Dash is held, not tapped: the client sends { active } whenever the button
+  // state changes, and the tick drains mass for as long as it stays on.
+  socket.on('dash', (data) => {
     const player = gameState.players[socket.id];
     if (!player) return;
 
-    // Too small to spare the mass. Re-dashing mid-dash is allowed; the score
-    // cost is what keeps it from being spammed.
-    if (player.score <= DASH_MIN_SCORE) return;
-
-    player.score -= DASH_SCORE_COST;
-    refreshPlayerSize(player);
-    player.dashTimer = DASH_DURATION;
+    player.isDashing = data?.active === true;
   });
 
   socket.on('disconnect', (reason) => {
@@ -474,9 +488,15 @@ setInterval(() => {
 
     let speed = player.speed;
 
-    if (player.dashTimer > 0) {
+    if (player.isDashing && player.score > MIN_DASH_SCORE) {
+      player.score = Math.max(MIN_DASH_SCORE, player.score - DASH_COST_PER_SEC * deltaTime);
+      refreshPlayerSize(player);
       speed *= DASH_MULTIPLIER;
-      player.dashTimer = Math.max(0, player.dashTimer - deltaTime);
+      // Kept above zero while dashing so the client's fast tail wag still works.
+      player.dashTimer = 1;
+    } else {
+      player.isDashing = false;
+      player.dashTimer = 0;
     }
 
     // Scaling by deltaTime keeps travel speed constant even if a tick runs late.
@@ -524,7 +544,7 @@ httpServer.listen(PORT, () => {
   console.log(`Walls are lethal | bump drain ${BUMP_DRAIN_PER_SECOND * 100}%/s`);
   console.log(
     `Speed ${BASE_SPEED} for all | turn ${BASE_TURN_SPEED}..${MIN_TURN_SPEED} rad/s | ` +
-      `radius caps at ${MAX_RADIUS.toFixed(1)} (score ${MAX_SCORE_FOR_RADIUS})`,
+      `radius caps at ${MAX_RADIUS}`,
   );
   console.log(`Accepting browser clients from ${CLIENT_ORIGIN}`);
 });
