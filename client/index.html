@@ -212,7 +212,9 @@
 
       #nickname:focus-visible,
       #play:focus-visible,
-      #color:focus-visible {
+      #colorPickerBtn:focus-visible,
+      .color-popover button:focus-visible,
+      .pill:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 2px;
       }
@@ -227,13 +229,166 @@
         flex: 1;
       }
 
-      #color {
-        width: 52px;
+      #colorPickerBtn {
+        display: flex;
+        align-items: center;
+        gap: 7px;
         height: 44px;
-        padding: 2px;
+        padding: 0 12px;
+        font-family: inherit;
+        font-size: 14px;
+        color: var(--ink);
         background: rgba(255, 255, 255, 0.07);
         border: 1px solid rgba(255, 255, 255, 0.16);
         border-radius: 9px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      #colorSwatch {
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        background: #38bdf8;
+      }
+
+      /* The popover is positioned against the lobby card. */
+      #lobby-panel {
+        position: relative;
+      }
+
+      .color-popover {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 5;
+        width: 272px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding: 14px;
+        border-radius: 14px;
+        background: rgba(6, 24, 44, 0.97);
+        border: 1px solid rgba(120, 210, 255, 0.25);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+      }
+
+      .color-popover[hidden] {
+        display: none;
+      }
+
+      #lobbyPreviewCanvas {
+        width: 240px;
+        height: 145px;
+        border-radius: 12px;
+        background: radial-gradient(circle at 50% 35%, #0e5a8a, #041f36);
+        border: 1px solid rgba(120, 210, 255, 0.25);
+      }
+
+      .color-popover .caption {
+        margin: -4px 0 0;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        color: rgba(232, 241, 255, 0.55);
+      }
+
+      .swatches {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .swatch {
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.2);
+        cursor: pointer;
+      }
+
+      .swatch.selected {
+        border-color: #fff;
+      }
+
+      #sharkColorInput {
+        width: 32px;
+        height: 26px;
+        padding: 0;
+        background: none;
+        border: 0;
+        cursor: pointer;
+      }
+
+      #closeColorPopoverBtn {
+        padding: 7px 22px;
+        font-family: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        color: #04121f;
+        background: var(--accent);
+        border: 0;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+
+      .audio-toggles {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+      }
+
+      .pill {
+        padding: 6px 12px;
+        font-family: inherit;
+        font-size: 12px;
+        color: var(--ink);
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 999px;
+        cursor: pointer;
+      }
+
+      .pill.off {
+        opacity: 0.55;
+      }
+
+      #hudAudioControls {
+        position: fixed;
+        left: 16px;
+        bottom: 16px;
+        display: none;
+        gap: 8px;
+        z-index: 15;
+      }
+
+      #hudAudioControls button {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        font-size: 16px;
+        line-height: 1;
+        color: #fff;
+        background: rgba(5, 16, 36, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 50%;
+        opacity: 0.6;
+        backdrop-filter: blur(4px);
+        cursor: pointer;
+      }
+
+      #hudAudioControls button:hover {
+        opacity: 1;
+      }
+
+      #hudAudioControls button.off {
+        filter: grayscale(1);
+        opacity: 0.35;
       }
 
       #play {
@@ -299,10 +454,6 @@
 
         <p id="lobby-message" role="status" aria-live="polite"></p>
 
-        <div style="display:flex; justify-content:center; margin: 10px 0;">
-          <canvas id="lobbyPreviewCanvas" width="240" height="150" style="border-radius:12px; background: radial-gradient(circle at 50% 35%, #0e5a8a, #041f36); border: 1px solid rgba(120,210,255,0.25);"></canvas>
-        </div>
-
         <div class="row">
           <div>
             <label for="nickname">Nickname</label>
@@ -316,9 +467,31 @@
             />
           </div>
           <div>
-            <label for="color">Colour</label>
-            <input id="color" name="color" type="color" value="#4ad4a0" />
+            <button id="colorPickerBtn" type="button" title="Choose Shark Color" aria-haspopup="dialog" aria-controls="colorPopover">
+              <span id="colorSwatch" aria-hidden="true"></span>🎨 Color
+            </button>
           </div>
+        </div>
+
+        <div id="colorPopover" class="color-popover" role="dialog" aria-label="Shark colour" hidden>
+          <canvas id="lobbyPreviewCanvas" width="240" height="145"></canvas>
+          <p class="caption">Live Shark Preview</p>
+
+          <div class="swatches">
+            <button type="button" class="swatch" data-color="#38bdf8" style="background:#38bdf8" aria-label="#38bdf8"></button>
+            <button type="button" class="swatch" data-color="#f43f5e" style="background:#f43f5e" aria-label="#f43f5e"></button>
+            <button type="button" class="swatch" data-color="#a855f7" style="background:#a855f7" aria-label="#a855f7"></button>
+            <button type="button" class="swatch" data-color="#10b981" style="background:#10b981" aria-label="#10b981"></button>
+            <button type="button" class="swatch" data-color="#f59e0b" style="background:#f59e0b" aria-label="#f59e0b"></button>
+            <button type="button" class="swatch" data-color="#ec4899" style="background:#ec4899" aria-label="#ec4899"></button>
+            <button type="button" class="swatch" data-color="#06b6d4" style="background:#06b6d4" aria-label="#06b6d4"></button>
+            <button type="button" class="swatch" data-color="#84cc16" style="background:#84cc16" aria-label="#84cc16"></button>
+            <button type="button" class="swatch" data-color="#fb7185" style="background:#fb7185" aria-label="#fb7185"></button>
+            <button type="button" class="swatch" data-color="#6366f1" style="background:#6366f1" aria-label="#6366f1"></button>
+            <input id="sharkColorInput" type="color" value="#38bdf8" aria-label="Custom colour" />
+          </div>
+
+          <button id="closeColorPopoverBtn" type="button">Done</button>
         </div>
 
         <p id="nickname-hint" class="hint">Names are capped at 12 characters.</p>
@@ -326,10 +499,20 @@
         <button id="play" type="submit">Play</button>
 
         <p class="hint">
-          Move with the mouse. Space or click to dash, which burns mass for speed.
+          Move with the mouse. Hold space or click to dash, which burns mass for speed.
           Eat pellets and smaller sharks. The arena walls are lethal.
         </p>
+
+        <div class="audio-toggles">
+          <button id="lobbyBgmBtn" class="pill" type="button">🎵 BGM: ON</button>
+          <button id="lobbySfxBtn" class="pill" type="button">🔊 SFX: ON</button>
+        </div>
       </form>
+    </div>
+
+    <div id="hudAudioControls">
+      <button id="hudBgmBtn" type="button" title="Toggle music" aria-label="Toggle music">🎵</button>
+      <button id="hudSfxBtn" type="button" title="Toggle sound effects" aria-label="Toggle sound effects">🔊</button>
     </div>
 
     <script type="module" src="/src/main.js"></script>

@@ -67,7 +67,17 @@ const lobby = document.querySelector('#lobby');
 const lobbyPanel = document.querySelector('#lobby-panel');
 const lobbyMessage = document.querySelector('#lobby-message');
 const nameInput = document.querySelector('#nickname');
-const colorInput = document.querySelector('#color');
+const colorInput = document.querySelector('#sharkColorInput');
+const colorPickerBtn = document.querySelector('#colorPickerBtn');
+const colorSwatch = document.querySelector('#colorSwatch');
+const colorPopover = document.querySelector('#colorPopover');
+const closeColorPopoverBtn = document.querySelector('#closeColorPopoverBtn');
+const swatchButtons = [...colorPopover.querySelectorAll('.swatch')];
+const lobbyBgmBtn = document.querySelector('#lobbyBgmBtn');
+const lobbySfxBtn = document.querySelector('#lobbySfxBtn');
+const hudAudioControls = document.querySelector('#hudAudioControls');
+const hudBgmBtn = document.querySelector('#hudBgmBtn');
+const hudSfxBtn = document.querySelector('#hudSfxBtn');
 const playButton = document.querySelector('#play');
 const nameplateLayer = document.querySelector('#nameplates');
 const leaderboardEl = document.querySelector('#leaderboard');
@@ -78,6 +88,356 @@ const statRank = document.querySelector('#stat-rank');
 const gameoverEl = document.querySelector('#gameover');
 const gameoverCause = document.querySelector('#gameover-cause');
 const gameoverSize = document.querySelector('#gameover-size');
+
+// --- Sound ------------------------------------------------------------------
+
+// Everything is synthesised with Web Audio, so there are no asset files. The
+// context can only start after a user gesture, so it is created lazily.
+const SFX_HEARING_RANGE = 900;
+const BGM_PREF_KEY = 'happyshark.bgm';
+const SFX_PREF_KEY = 'happyshark.sfx';
+const CHIME_NOTES = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3];
+const CHIME_INTERVAL_MS = 1800;
+
+function loadAudioPref(key) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? true : value === '1';
+  } catch {
+    return true;
+  }
+}
+
+function saveAudioPref(key, enabled) {
+  try {
+    localStorage.setItem(key, enabled ? '1' : '0');
+  } catch {
+    /* storage is best effort */
+  }
+}
+
+const SoundManager = (() => {
+  let ctx = null;
+  let bgmBus = null;
+  let sfxBus = null;
+  let noiseBuffer = null;
+  let pad = null;
+  let chimeTimer = null;
+  let dash = null;
+  let dashActive = false;
+  let lastBumpAt = 0;
+
+  let bgmEnabled = loadAudioPref(BGM_PREF_KEY);
+  let sfxEnabled = loadAudioPref(SFX_PREF_KEY);
+
+  const running = () => ctx !== null && ctx.state === 'running';
+  const sfxReady = () => sfxEnabled && running();
+
+  function unlock() {
+    if (!ctx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+
+      ctx = new Ctx();
+      const master = ctx.createGain();
+      master.connect(ctx.destination);
+
+      bgmBus = ctx.createGain();
+      bgmBus.gain.value = bgmEnabled ? 1 : 0;
+      bgmBus.connect(master);
+
+      sfxBus = ctx.createGain();
+      sfxBus.connect(master);
+
+      // One second of white noise, reused by every noisy effect.
+      noiseBuffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+      ctx.onstatechange = syncBgm;
+    }
+
+    if (ctx.state === 'suspended') ctx.resume();
+    syncBgm();
+  }
+
+  /** A pitched blip with a fast attack and an exponential decay. */
+  function tone(type, from, to, duration, gain, delay = 0) {
+    const t = ctx.currentTime + delay;
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(from, t);
+    if (to !== from) osc.frequency.exponentialRampToValueAtTime(to, t + duration);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, t);
+    env.gain.exponentialRampToValueAtTime(gain, t + Math.min(0.01, duration / 4));
+    env.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+
+    osc.connect(env).connect(sfxBus);
+    osc.start(t);
+    osc.stop(t + duration + 0.03);
+  }
+
+  /** A filtered burst of noise. */
+  function noise(filterType, frequency, duration, gain, delay = 0) {
+    const t = ctx.currentTime + delay;
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = filterType;
+    filter.frequency.value = frequency;
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(gain, t);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+
+    src.connect(filter).connect(env).connect(sfxBus);
+    src.start(t);
+    src.stop(t + duration + 0.03);
+  }
+
+  // --- Ambient BGM ---
+
+  function startPad() {
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 520;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0.035;
+    filter.connect(gain).connect(bgmBus);
+
+    const low = ctx.createOscillator();
+    low.type = 'triangle';
+    low.frequency.value = 110;
+    const fifth = ctx.createOscillator();
+    fifth.type = 'sine';
+    fifth.frequency.value = 164.8;
+
+    low.connect(filter);
+    fifth.connect(filter);
+    low.start();
+    fifth.start();
+
+    pad = { oscillators: [low, fifth], gain };
+  }
+
+  function stopPad() {
+    if (!pad) return;
+    for (const osc of pad.oscillators) osc.stop();
+    pad.gain.disconnect();
+    pad = null;
+  }
+
+  function pluckChime() {
+    if (!running() || !bgmEnabled) return;
+
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = CHIME_NOTES[Math.floor(Math.random() * CHIME_NOTES.length)];
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, t);
+    env.gain.exponentialRampToValueAtTime(0.045, t + 0.02);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + 1.6);
+
+    osc.connect(env).connect(bgmBus);
+    osc.start(t);
+    osc.stop(t + 1.65);
+  }
+
+  function syncBgm() {
+    if (!ctx) return;
+    const on = bgmEnabled && running();
+
+    bgmBus.gain.cancelScheduledValues(ctx.currentTime);
+    bgmBus.gain.setValueAtTime(on ? 1 : 0, ctx.currentTime);
+
+    if (on && !pad) {
+      startPad();
+      chimeTimer = setInterval(pluckChime, CHIME_INTERVAL_MS);
+    } else if (!on && pad) {
+      stopPad();
+      clearInterval(chimeTimer);
+      chimeTimer = null;
+    }
+  }
+
+  // --- Dash whoosh ---
+
+  function ensureDashLoop() {
+    if (dash) return;
+
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+    src.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 850;
+    filter.Q.value = 0.8;
+
+    // A slow LFO swells the whoosh in time with the tail beats.
+    const pulse = ctx.createGain();
+    pulse.gain.value = 0.65;
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 6;
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = 0.35;
+    lfo.connect(lfoDepth).connect(pulse.gain);
+
+    const level = ctx.createGain();
+    level.gain.value = 0;
+
+    src.connect(filter).connect(pulse).connect(level).connect(sfxBus);
+    src.start();
+    lfo.start();
+
+    dash = { level };
+  }
+
+  function setDashLoop(active) {
+    const next = active && sfxReady();
+    if (next === dashActive) return;
+    dashActive = next;
+
+    if (!running()) return;
+    ensureDashLoop();
+    dash.level.gain.setTargetAtTime(next ? 0.09 : 0, ctx.currentTime, 0.08);
+  }
+
+  // --- SFX ---
+
+  function playClick() {
+    if (!sfxReady()) return;
+    tone('sine', 520, 780, 0.08, 0.08);
+  }
+
+  function playEatPellet() {
+    if (!sfxReady()) return;
+    const v = 1 + (Math.random() - 0.5) * 0.2;
+    tone('sine', 380 * v, 680 * v, 0.09, 0.09);
+  }
+
+  function playEatFish() {
+    if (!sfxReady()) return;
+    tone('sine', 520, 520, 0.12, 0.14);
+    tone('sine', 780, 780, 0.16, 0.14, 0.06);
+    noise('highpass', 3200, 0.06, 0.06);
+  }
+
+  function playBump() {
+    if (!sfxReady()) return;
+    const now = performance.now();
+    if (now - lastBumpAt < 180) return;
+    lastBumpAt = now;
+
+    tone('triangle', 130, 48, 0.14, 0.16);
+    noise('lowpass', 900, 0.12, 0.08);
+  }
+
+  function playChomp() {
+    if (!sfxReady()) return;
+    tone('triangle', 220, 55, 0.22, 0.22);
+    tone('sine', 440, 660, 0.16, 0.12, 0.06);
+  }
+
+  function playDeath() {
+    if (!sfxReady()) return;
+    const t = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(180, t);
+    osc.frequency.exponentialRampToValueAtTime(32, t + 0.9);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1400, t);
+    filter.frequency.exponentialRampToValueAtTime(120, t + 0.9);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, t);
+    env.gain.exponentialRampToValueAtTime(0.25, t + 0.03);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+
+    osc.connect(filter).connect(env).connect(sfxBus);
+    osc.start(t);
+    osc.stop(t + 0.95);
+  }
+
+  // --- Toggles ---
+
+  function syncButtons() {
+    lobbyBgmBtn.textContent = `🎵 BGM: ${bgmEnabled ? 'ON' : 'OFF'}`;
+    lobbySfxBtn.textContent = `${sfxEnabled ? '🔊' : '🔇'} SFX: ${sfxEnabled ? 'ON' : 'OFF'}`;
+    lobbyBgmBtn.classList.toggle('off', !bgmEnabled);
+    lobbySfxBtn.classList.toggle('off', !sfxEnabled);
+
+    hudBgmBtn.classList.toggle('off', !bgmEnabled);
+    hudSfxBtn.textContent = sfxEnabled ? '🔊' : '🔇';
+    hudSfxBtn.classList.toggle('off', !sfxEnabled);
+
+    for (const btn of [lobbyBgmBtn, hudBgmBtn]) btn.setAttribute('aria-pressed', String(bgmEnabled));
+    for (const btn of [lobbySfxBtn, hudSfxBtn]) btn.setAttribute('aria-pressed', String(sfxEnabled));
+  }
+
+  function toggleBgm() {
+    bgmEnabled = !bgmEnabled;
+    saveAudioPref(BGM_PREF_KEY, bgmEnabled);
+    syncBgm();
+    syncButtons();
+  }
+
+  function toggleSfx() {
+    sfxEnabled = !sfxEnabled;
+    saveAudioPref(SFX_PREF_KEY, sfxEnabled);
+    if (!sfxEnabled) setDashLoop(false);
+    syncButtons();
+  }
+
+  syncButtons();
+
+  return {
+    unlock,
+    toggleBgm,
+    toggleSfx,
+    setDashLoop,
+    playClick,
+    playEatPellet,
+    playEatFish,
+    playBump,
+    playChomp,
+    playDeath,
+  };
+})();
+
+// Browsers only let audio start from a user gesture.
+window.addEventListener('pointerdown', SoundManager.unlock);
+window.addEventListener('keydown', SoundManager.unlock);
+
+for (const [btn, toggle] of [
+  [lobbyBgmBtn, SoundManager.toggleBgm],
+  [hudBgmBtn, SoundManager.toggleBgm],
+  [lobbySfxBtn, SoundManager.toggleSfx],
+  [hudSfxBtn, SoundManager.toggleSfx],
+]) {
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggle();
+    SoundManager.playClick();
+    // Drop focus so Space keeps meaning "dash" rather than re-clicking this.
+    btn.blur();
+  });
+}
+
+// The window's mousedown handler starts a dash; HUD clicks must never reach it.
+for (const btn of [hudBgmBtn, hudSfxBtn]) {
+  btn.addEventListener('mousedown', (event) => event.stopPropagation());
+}
 
 // --- Three.js ---------------------------------------------------------------
 
@@ -210,32 +570,105 @@ foodInstancedMesh.count = 0;
 foodInstancedMesh.frustumCulled = false;
 scene.add(foodInstancedMesh);
 
+/**
+ * Dried fish left behind by dead and bumped sharks. A flattened diamond body
+ * (nose at +x) plus a forked tail fin, built as raw triangles with outward
+ * winding so computeVertexNormals gives a faceted, jerky-like look.
+ */
+function buildFishGeometry() {
+  const nose = [9, 0, 0];
+  const back = [-7, 0, 0];
+  // Ring around the widest point, ordered top, right, bottom, left.
+  const ring = [
+    [1, 1.8, 0],
+    [1, 0, 4.5],
+    [1, -1.8, 0],
+    [1, 0, -4.5],
+  ];
+
+  const triangles = [];
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i];
+    const b = ring[(i + 1) % ring.length];
+    triangles.push(nose, a, b);
+    triangles.push(back, b, a);
+  }
+
+  // Forked tail: two blades meeting at a notch, in the y = 0 plane.
+  const root = [-6.5, 0, 0];
+  const notch = [-10.5, 0, 0];
+  triangles.push(root, [-13, 0, -5.5], notch);
+  triangles.push(root, notch, [-13, 0, 5.5]);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(triangles.flat(), 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const fishInstancedMesh = new THREE.InstancedMesh(
+  buildFishGeometry(),
+  // Double-sided so the flat tail fin reads from either side.
+  new THREE.MeshStandardMaterial({
+    color: 0xf5a642,
+    roughness: 0.55,
+    metalness: 0.1,
+    side: THREE.DoubleSide,
+  }),
+  FOOD_INSTANCE_CAPACITY,
+);
+fishInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+fishInstancedMesh.count = 0;
+fishInstancedMesh.frustumCulled = false;
+scene.add(fishInstancedMesh);
+
 // Retained for backward-compat with the dev handle; tracks nothing visual now.
 const foodMeshes = new Map();
 
 const _foodMatrix = new THREE.Matrix4();
 const _foodColor = new THREE.Color();
 const _foodScale = new THREE.Vector3();
+const _fishPosition = new THREE.Vector3();
+const _fishEuler = new THREE.Euler();
+const _fishQuaternion = new THREE.Quaternion();
+const _fishScale = new THREE.Vector3(1.15, 1.15, 1.15);
 
-/** Rebuild every food instance from `localGameState.food`. */
-function syncFoodInstances() {
+/** Rebuild every food instance from `localGameState.food`, split by kind. */
+function syncFoodInstances(now) {
   const food = localGameState.food;
-  const count = Math.min(food.length, FOOD_INSTANCE_CAPACITY);
+  let pellets = 0;
+  let fish = 0;
 
-  for (let i = 0; i < count; i++) {
-    const pellet = food[i];
+  for (const item of food) {
+    if (item.kind === 'fish') {
+      if (fish >= FOOD_INSTANCE_CAPACITY) continue;
 
-    _foodMatrix.makeTranslation(pellet.x, FOOD_HEIGHT, pellet.y);
-    _foodMatrix.scale(_foodScale.setScalar(foodRadius));
-    foodInstancedMesh.setMatrixAt(i, _foodMatrix);
+      _fishPosition.set(item.x, 6 + Math.sin(now * 0.004 + item.x) * 1.5, item.y);
+      // YXZ: tilt about the fish's own X first, then spin it about Y.
+      _fishEuler.set(0.25, item.rot || 0, 0, 'YXZ');
+      _fishQuaternion.setFromEuler(_fishEuler);
+      _foodMatrix.compose(_fishPosition, _fishQuaternion, _fishScale);
+      fishInstancedMesh.setMatrixAt(fish, _foodMatrix);
+      fish += 1;
+    } else {
+      if (pellets >= FOOD_INSTANCE_CAPACITY) continue;
 
-    _foodColor.set(pellet.color);
-    foodInstancedMesh.setColorAt(i, _foodColor);
+      _foodMatrix.makeTranslation(item.x, FOOD_HEIGHT, item.y);
+      _foodMatrix.scale(_foodScale.setScalar(foodRadius));
+      foodInstancedMesh.setMatrixAt(pellets, _foodMatrix);
+
+      _foodColor.set(item.color);
+      foodInstancedMesh.setColorAt(pellets, _foodColor);
+      pellets += 1;
+    }
   }
 
-  foodInstancedMesh.count = count;
+  foodInstancedMesh.count = pellets;
   foodInstancedMesh.instanceMatrix.needsUpdate = true;
   if (foodInstancedMesh.instanceColor) foodInstancedMesh.instanceColor.needsUpdate = true;
+
+  fishInstancedMesh.count = fish;
+  fishInstancedMesh.instanceMatrix.needsUpdate = true;
 }
 
 // Legacy helpers kept thin — actual rendering now goes through syncFoodInstances.
@@ -454,11 +887,11 @@ const previewRenderer = new THREE.WebGLRenderer({
   antialias: true,
 });
 previewRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-previewRenderer.setSize(240, 150, false);
+previewRenderer.setSize(240, 145, false);
 previewRenderer.setClearColor(0x000000, 0);
 
 const previewScene = new THREE.Scene();
-const previewCamera = new THREE.PerspectiveCamera(38, 240 / 150, 0.1, 100);
+const previewCamera = new THREE.PerspectiveCamera(38, 240 / 145, 0.1, 100);
 previewCamera.position.set(0, 0.45, 3.2);
 previewCamera.lookAt(0, 0, 0);
 
@@ -470,8 +903,48 @@ previewScene.add(previewSun);
 const previewShark = buildSharkRig(colorInput.value);
 previewScene.add(previewShark.group);
 
-colorInput.addEventListener('input', () => {
-  previewShark.skinMaterial.color.set(colorInput.value);
+/** One place that keeps the input, the trigger swatch and the preview in sync. */
+function applySharkColor(hex) {
+  colorInput.value = hex;
+  colorSwatch.style.background = hex;
+  previewShark.skinMaterial.color.set(hex);
+  for (const btn of swatchButtons) {
+    btn.classList.toggle('selected', btn.dataset.color === hex.toLowerCase());
+  }
+}
+
+function setColorPopoverOpen(open) {
+  colorPopover.hidden = !open;
+  colorPickerBtn.setAttribute('aria-expanded', String(open));
+}
+
+applySharkColor(colorInput.value);
+setColorPopoverOpen(false);
+
+colorPickerBtn.addEventListener('click', () => {
+  SoundManager.playClick();
+  setColorPopoverOpen(colorPopover.hidden);
+});
+
+for (const btn of swatchButtons) {
+  btn.addEventListener('click', () => {
+    SoundManager.playClick();
+    applySharkColor(btn.dataset.color);
+  });
+}
+
+colorInput.addEventListener('input', () => applySharkColor(colorInput.value));
+
+closeColorPopoverBtn.addEventListener('click', () => {
+  SoundManager.playClick();
+  setColorPopoverOpen(false);
+});
+
+// Clicking anywhere outside the popover (other than its trigger) closes it.
+document.addEventListener('mousedown', (event) => {
+  if (colorPopover.hidden) return;
+  if (colorPopover.contains(event.target) || colorPickerBtn.contains(event.target)) return;
+  setColorPopoverOpen(false);
 });
 
 function renderLobbyPreview(now) {
@@ -485,12 +958,14 @@ function renderLobbyPreview(now) {
 
 const minimapCanvas = document.querySelector('#minimapCanvas');
 const minimapCtx = minimapCanvas.getContext('2d');
-let minimapVisible = false;
+let gameHudVisible = false;
 
-function setMinimapVisible(visible) {
-  if (minimapVisible === visible) return;
-  minimapVisible = visible;
+/** Minimap and audio HUD appear together while alive in a game. */
+function setGameHudVisible(visible) {
+  if (gameHudVisible === visible) return;
+  gameHudVisible = visible;
   minimapCanvas.style.display = visible ? 'block' : 'none';
+  hudAudioControls.style.display = visible ? 'flex' : 'none';
 }
 
 function drawMinimap(now) {
@@ -584,6 +1059,8 @@ lobbyPanel.addEventListener('submit', (event) => {
   event.preventDefault();
   if (!socket.connected) return;
 
+  SoundManager.playClick();
+  setColorPopoverOpen(false);
   playing = true;
   gameOver = null;
   lastCamera = null;
@@ -636,6 +1113,32 @@ socket.on('foodUpdate', ({ eatenIds, newFood }) => {
   if (newFood?.length) {
     localGameState.food.push(...newFood);
     newFood.forEach(addPellet);
+  }
+});
+
+// Batched per server tick. Nearby positional sounds only; death is ours alone.
+socket.on('sfx', (events) => {
+  if (!Array.isArray(events)) return;
+
+  const me = renderState.players[myId];
+  const listener = me ?? lastCamera;
+  // Each kind plays at most once per batch so a feeding frenzy doesn't stack.
+  const played = new Set();
+
+  for (const event of events) {
+    if (event.type === 'death') {
+      if (event.playerId === myId) SoundManager.playDeath();
+      continue;
+    }
+
+    if (!listener || played.has(event.type)) continue;
+    if (Math.hypot(event.x - listener.x, event.y - listener.y) >= SFX_HEARING_RANGE) continue;
+
+    played.add(event.type);
+    if (event.type === 'eat_pellet') SoundManager.playEatPellet();
+    else if (event.type === 'eat_fish') SoundManager.playEatFish();
+    else if (event.type === 'bump') SoundManager.playBump();
+    else if (event.type === 'chomp') SoundManager.playChomp();
   }
 });
 
@@ -1016,23 +1519,26 @@ function frame() {
 
   // Rebuild the food InstancedMesh every frame so additions and removals are
   // always reflected without per-pellet bookkeeping.
-  syncFoodInstances();
+  syncFoodInstances(now);
   updateBubbles(now, dt);
 
   if (me) {
     placeCamera(renderState.players[myId]);
     updateHud(renderState.players[myId]);
-    setMinimapVisible(true);
+    setGameHudVisible(true);
     drawMinimap(now);
   } else {
     restoreCamera();
-    setMinimapVisible(false);
+    setGameHudVisible(false);
   }
+
+  SoundManager.setDashLoop(Boolean(me && me.dashTimer > 0));
 
   updateNameplates();
   renderer.render(scene, camera);
 
-  if (!lobby.hidden) renderLobbyPreview(now);
+  // The preview only costs a render while someone is actually looking at it.
+  if (!lobby.hidden && !colorPopover.hidden) renderLobbyPreview(now);
 
   if (gameOver) {
     const elapsed = now - gameOver.diedAt;
@@ -1059,6 +1565,7 @@ if (import.meta.env.DEV) {
     sharks,
     foodMeshes,
     foodInstancedMesh,
+    fishInstancedMesh,
     renderState,
     constants: {
       CAMERA_REFERENCE_RADIUS,
