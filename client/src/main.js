@@ -121,8 +121,9 @@ const SoundManager = (() => {
   let bgmBus = null;
   let sfxBus = null;
   let noiseBuffer = null;
-  let pad = null;
-  let chimeTimer = null;
+  // Whichever BGM is playing right now, as { mode, stop }.
+  let bgm = null;
+  let bgmMode = 'lobby';
   let dash = null;
   let dashActive = false;
   let lastBumpAt = 0;
@@ -162,7 +163,7 @@ const SoundManager = (() => {
   }
 
   /** A pitched blip with a fast attack and an exponential decay. */
-  function tone(type, from, to, duration, gain, delay = 0) {
+  function tone(type, from, to, duration, gain, delay = 0, dest = sfxBus) {
     const t = ctx.currentTime + delay;
     const osc = ctx.createOscillator();
     osc.type = type;
@@ -174,7 +175,7 @@ const SoundManager = (() => {
     env.gain.exponentialRampToValueAtTime(gain, t + Math.min(0.01, duration / 4));
     env.gain.exponentialRampToValueAtTime(0.0001, t + duration);
 
-    osc.connect(env).connect(sfxBus);
+    osc.connect(env).connect(dest);
     osc.start(t);
     osc.stop(t + duration + 0.03);
   }
@@ -198,9 +199,11 @@ const SoundManager = (() => {
     src.stop(t + duration + 0.03);
   }
 
-  // --- Ambient BGM ---
+  // --- Background music ---
+  // Each starter builds its node graph and returns a function that tears it down.
 
-  function startPad() {
+  /** Lobby: a warm low-pass pad with a pentatonic chime every 1.8s. */
+  function startLobbyBgm() {
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value = 520;
@@ -221,14 +224,62 @@ const SoundManager = (() => {
     low.start();
     fifth.start();
 
-    pad = { oscillators: [low, fifth], gain };
+    const chimeTimer = setInterval(pluckChime, CHIME_INTERVAL_MS);
+
+    return () => {
+      low.stop();
+      fifth.stop();
+      gain.disconnect();
+      clearInterval(chimeTimer);
+    };
   }
 
-  function stopPad() {
-    if (!pad) return;
-    for (const osc of pad.oscillators) osc.stop();
-    pad.gain.disconnect();
-    pad = null;
+  /** In game: a slow underwater current rush plus sparse bubble blips. */
+  function startGameBgm() {
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+    src.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = 1.8;
+    filter.frequency.value = 165;
+
+    // A very slow LFO sweeps the band, which is what makes it read as a current.
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.14;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 75;
+    lfo.connect(lfoGain).connect(filter.frequency);
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0.038;
+
+    src.connect(filter).connect(gain).connect(bgmBus);
+    src.start();
+    lfo.start();
+
+    let bubbleTimer = null;
+    const scheduleBubbles = () => {
+      bubbleTimer = setTimeout(() => {
+        if (running()) {
+          const count = 2 + Math.floor(Math.random() * 2);
+          for (const offset of [0, 0.09, 0.19].slice(0, count)) {
+            tone('sine', 260, 540, 0.06, 0.022, offset, bgmBus);
+          }
+        }
+        scheduleBubbles();
+      }, 1100 + Math.random() * 1100);
+    };
+    scheduleBubbles();
+
+    return () => {
+      src.stop();
+      lfo.stop();
+      gain.disconnect();
+      clearTimeout(bubbleTimer);
+    };
   }
 
   function pluckChime() {
@@ -249,21 +300,27 @@ const SoundManager = (() => {
     osc.stop(t + 1.65);
   }
 
+  /** Starts, stops or swaps the BGM so it matches the toggle and the mode. */
   function syncBgm() {
     if (!ctx) return;
-    const on = bgmEnabled && running();
+    const wanted = bgmEnabled && running() ? bgmMode : null;
 
     bgmBus.gain.cancelScheduledValues(ctx.currentTime);
-    bgmBus.gain.setValueAtTime(on ? 1 : 0, ctx.currentTime);
+    bgmBus.gain.setValueAtTime(wanted ? 1 : 0, ctx.currentTime);
 
-    if (on && !pad) {
-      startPad();
-      chimeTimer = setInterval(pluckChime, CHIME_INTERVAL_MS);
-    } else if (!on && pad) {
-      stopPad();
-      clearInterval(chimeTimer);
-      chimeTimer = null;
+    if (bgm && bgm.mode === wanted) return;
+
+    if (bgm) bgm.stop();
+    bgm = null;
+
+    if (wanted) {
+      bgm = { mode: wanted, stop: wanted === 'game' ? startGameBgm() : startLobbyBgm() };
     }
+  }
+
+  function setBgmMode(mode) {
+    bgmMode = mode === 'game' ? 'game' : 'lobby';
+    syncBgm();
   }
 
   // --- Dash whoosh ---
@@ -403,6 +460,7 @@ const SoundManager = (() => {
 
   return {
     unlock,
+    setBgmMode,
     toggleBgm,
     toggleSfx,
     setDashLoop,
@@ -1031,10 +1089,24 @@ const renderState = { players: {} };
 // using it, since the shark it was following no longer exists.
 let lastCamera = null;
 
+function formatDuration(sec = 0) {
+  const s = Math.max(1, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return m > 0 ? `${m}m ${rem}s` : `${rem}s`;
+}
+
+/** " · Survived 1m 24s", or nothing if an older server didn't send the time. */
+function survivedSuffix(info) {
+  return Number.isFinite(info.survivalTime) ? ` · Survived ${formatDuration(info.survivalTime)}` : '';
+}
+
 function deathHeadline(info) {
-  return info.cause === 'wall'
-    ? `You hit the wall at size ${info.score}.`
-    : `Eaten by ${info.eatenByName ?? 'a bigger shark'} at size ${info.score}.`;
+  const base =
+    info.cause === 'wall'
+      ? `You hit the wall at size ${info.score}`
+      : `Eaten by ${info.eatenByName ?? 'a bigger shark'} at size ${info.score}`;
+  return `${base}${survivedSuffix(info)}`;
 }
 
 const socket = io(SERVER_URL);
@@ -1060,6 +1132,7 @@ lobbyPanel.addEventListener('submit', (event) => {
   if (!socket.connected) return;
 
   SoundManager.playClick();
+  SoundManager.setBgmMode('game');
   setColorPopoverOpen(false);
   playing = true;
   gameOver = null;
@@ -1147,11 +1220,12 @@ socket.on('gameOver', (info) => {
   // plays over the live arena, and the lobby only returns once it finishes.
   playing = false;
   resetDash();
+  SoundManager.setBgmMode('lobby');
   gameOver = { ...info, diedAt: performance.now() };
 
   gameoverCause.textContent =
     info.cause === 'wall' ? 'You hit the wall' : `Eaten by ${info.eatenByName ?? 'a bigger shark'}`;
-  gameoverSize.textContent = `Final size ${info.score}`;
+  gameoverSize.textContent = `Final size ${info.score}${survivedSuffix(info)}`;
   gameoverEl.hidden = false;
   leaderboardEl.hidden = true;
   statsEl.hidden = true;
@@ -1164,6 +1238,7 @@ socket.on('disconnect', (reason) => {
 
   playing = false;
   resetDash();
+  SoundManager.setBgmMode('lobby');
   playButton.disabled = true;
 
   // The cinematic closes the session itself and has already put the lobby up.

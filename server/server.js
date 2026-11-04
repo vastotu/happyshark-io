@@ -63,13 +63,9 @@ const EAT_RATIO_SCORE = 1.15 ** 2;
 const BUMP_DRAIN_PER_SECOND = 0.05;
 const BUMP_SCORE_FLOOR = 1;
 
-// A shark that dies to the wall leaves this share of itself behind.
-const DEATH_DROP_FRACTION = 0.5;
-const DEATH_DROP_MAX = 40;
-
-// Death and bump drops land as dried fish rather than plain pellets.
+// Death and bump drops land as dried fish rather than plain pellets. A dead
+// shark bursts into fish worth its whole score (see spawnDeathFishBurst).
 const FISH_COLOR = '#f5a642';
-const FISH_DEATH_VALUE = 3;
 const FISH_BUMP_VALUE = 1;
 
 // Bump sounds fire at most this often per pair of sharks.
@@ -82,11 +78,24 @@ const DEFAULT_NAME = 'Shark';
 // AI sharks top the arena up to TARGET_POPULATION and give way as humans join.
 const TARGET_POPULATION = 14;
 
-const BOT_NAMES = [
-  'kevin_99', 'SharkBite', 'nemo_lost', '阿瑋', 'tuna_roll', 'GuraFan',
-  '吃魚不吐骨', 'laggy_bro', 'mako_7', '深海肥宅', 'sushi_lover', ' FinFin',
-  'Chomper', '小魚乾獵人', 'aqua_kid', ' Bubbles', '浪裡白條', ' jaws_jr',
-  '鹹魚翻身', 'BlueFin', '呆呆鯊', 'orca_spy', '夜宵吃生魚片', 'drift_king',
+// Bot names are generated from these word lists. The cohort is seeded by a
+// 4-hour bucket, so names stay stable for a session but rotate over a day.
+const FIRST_WORDS = [
+  'lucas', 'chloe', 'mason', 'zoe', 'ethan', 'mia', 'noah', 'lily', 'logan', 'ava',
+  'leo', 'ruby', 'jack', 'maya', 'owen', 'nora', 'cole', 'ivy', 'max', 'ella',
+  'sam', 'jade', 'kai', 'lena', 'finn', 'mila', 'toby', 'zara', 'alex', 'evan',
+];
+
+const ADJECTIVES = [
+  'crispy', 'sleepy', 'cobalt', 'silent', 'salty', 'turbo', 'chill', 'dizzy',
+  'frosty', 'neon', 'sneaky', 'lucky', 'ghost', 'hyper', 'lazy', 'swift',
+  'cosmic', 'pixel', 'stormy', 'wild', 'groovy', 'shadow', 'sunny', 'aqua',
+];
+
+const NOUNS = [
+  'tuna', 'mako', 'biscuit', 'vortex', 'reef', 'anchovy', 'drifter', 'kelp',
+  'noodle', 'chomp', 'squid', 'minnow', 'barracuda', 'waffle', 'pebble', 'tide',
+  'fin', 'splash', 'krill', 'orca', 'guppy', 'sailor', 'pickle', 'harpoon',
 ];
 
 const BOT_COLORS = [
@@ -98,8 +107,8 @@ const BOT_SPAWN_INTERVAL_MS = 1000; // bots trickle in, at most one per second
 const BOT_SPAWN_MARGIN = 400; // from the walls
 const BOT_SAFE_DISTANCE = 400; // from any larger shark
 const BOT_WALL_ALERT = 340;
-const BOT_THREAT_RANGE = 340;
-const BOT_PREY_RANGE = 360;
+const BOT_THREAT_RANGE = 245;
+const BOT_PREY_RANGE = 255;
 const BOT_FOOD_RANGE = 550;
 
 const TICK_RATE = 30; // Hz
@@ -125,6 +134,56 @@ const lastBumpSfx = new Map();
 
 let botSerial = 0;
 let nextBotSpawnAt = 0;
+
+/** Small seeded PRNG, so a 4-hour bucket always yields the same name cohort. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+let currentNameBucket = -1;
+let activeBotNamePool = [];
+
+function getBotNamePool() {
+  const bucket = Math.floor(Date.now() / (4 * 60 * 60 * 1000));
+  if (bucket !== currentNameBucket) {
+    currentNameBucket = bucket;
+    const rand = mulberry32(bucket * 2654435761);
+    const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+    const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+    const names = new Set();
+
+    while (names.size < 28) {
+      const style = Math.floor(rand() * 4);
+      let candidate = '';
+      if (style === 0) candidate = `${pick(FIRST_WORDS)}_${Math.floor(10 + rand() * 89)}`;
+      else if (style === 1) candidate = `${cap(pick(ADJECTIVES))}${cap(pick(NOUNS))}`;
+      else if (style === 2) candidate = `${pick(ADJECTIVES)}_${pick(NOUNS)}`;
+      else candidate = `${pick(FIRST_WORDS)}${rand() < 0.5 ? Math.floor(1 + rand() * 99) : ''}`;
+      names.add(candidate.slice(0, 16));
+    }
+
+    activeBotNamePool = Array.from(names);
+
+    // Refresh existing bots if cohort rotated
+    const used = new Set();
+    for (const p of Object.values(gameState.players)) {
+      if (p.isBot && !activeBotNamePool.includes(p.name)) {
+        const nextName = activeBotNamePool.find((n) => !used.has(n)) || activeBotNamePool[0];
+        p.name = nextName;
+        used.add(nextName);
+      }
+    }
+  }
+
+  return activeBotNamePool;
+}
 
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);
@@ -210,6 +269,8 @@ function createPlayer(id, name, color) {
     isDashing: false,
     dashTimer: 0,
     isBot: false,
+    // Wall-clock spawn time, for the survival time shown on death.
+    spawnedAt: Date.now(),
   };
 
   player.targetAngle = Math.atan2(WORLD.height / 2 - player.y, WORLD.width / 2 - player.x);
@@ -322,21 +383,44 @@ function eatNearbyFood(player) {
 }
 
 /**
- * Removes a player and queues their gameOver event. `dropFood` is off when a
- * predator absorbed them, since the mass already went somewhere.
+ * Bursts a dead shark into dried fish worth its whole score, so the killer
+ * (or anyone nearby) has to swim in and eat the remains.
  */
-function killPlayer(id, { cause, eatenBy = null, eatenByName = null, dropFood = true }) {
+function spawnDeathFishBurst(victim, addedFood) {
+  const availableSlots = Math.max(0, FOOD_HARD_CAP - gameState.food.length);
+  if (availableSlots <= 0) return;
+
+  const totalScore = Math.max(3, Math.round(victim.score));
+  const desiredCount = Math.min(40, Math.max(4, Math.round(totalScore / 3.5)));
+  const dropCount = Math.min(desiredCount, availableSlots);
+  const valuePerFish = Number((totalScore / dropCount).toFixed(2));
+  const spread = Math.max(28, victim.radius * 0.95);
+
+  for (let i = 0; i < dropCount; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = Math.sqrt(Math.random()) * spread;
+    const fx = Math.max(FOOD_MARGIN, Math.min(WORLD.width - FOOD_MARGIN, victim.x + Math.cos(angle) * dist));
+    const fy = Math.max(FOOD_MARGIN, Math.min(WORLD.height - FOOD_MARGIN, victim.y + Math.sin(angle) * dist));
+    const fish = createFoodItem({
+      x: Number(fx.toFixed(1)),
+      y: Number(fy.toFixed(1)),
+      color: FISH_COLOR,
+      value: valuePerFish,
+      kind: 'fish',
+      rot: Number((Math.random() * Math.PI * 2).toFixed(2)),
+    });
+
+    gameState.food.push(fish);
+    addedFood.push(fish);
+  }
+}
+
+/** Removes a player, bursts them into fish, and queues their gameOver event. */
+function killPlayer(id, { cause, eatenBy = null, eatenByName = null }) {
   const player = gameState.players[id];
   if (!player) return;
 
-  if (dropFood) {
-    const pellets = Math.min(DEATH_DROP_MAX, Math.round(player.score * DEATH_DROP_FRACTION));
-    if (pellets > 0) {
-      tickNewFood.push(
-        ...scatterFish(pellets, player.x, player.y, player.radius + 80, FISH_DEATH_VALUE),
-      );
-    }
-  }
+  spawnDeathFishBurst(player, tickNewFood);
 
   delete gameState.players[id];
   dropDebt.delete(id);
@@ -350,6 +434,7 @@ function killPlayer(id, { cause, eatenBy = null, eatenByName = null, dropFood = 
     eatenByName,
     score: Math.floor(player.score),
     name: player.name,
+    survivalTime: Math.max(1, Math.round((Date.now() - player.spawnedAt) / 1000)),
   });
 
   console.log(
@@ -368,17 +453,14 @@ function touchesWall(player) {
   );
 }
 
+/** The predator gains nothing directly: the prey bursts into fish it must eat. */
 function devour(predator, prey) {
-  predator.score += prey.score;
-  refreshPlayerSize(predator);
-
   tickSfx.push({ type: 'chomp', x: prey.x, y: prey.y, playerId: predator.id });
 
   killPlayer(prey.id, {
     cause: 'eaten',
     eatenBy: predator.id,
     eatenByName: predator.name,
-    dropFood: false,
   });
 }
 
@@ -486,7 +568,7 @@ function rollBotScore(players) {
 
 function pickBotName(players) {
   const used = new Set(players.map((p) => p.name));
-  const free = BOT_NAMES.map(sanitizeName).filter((name) => !used.has(name));
+  const free = getBotNamePool().filter((name) => !used.has(name));
   if (free.length === 0) return `Shark_${botSerial}`;
   return free[Math.floor(Math.random() * free.length)];
 }
@@ -539,6 +621,9 @@ function spawnBot(now, players) {
  * human leaves silently (no fish, no sound); under it, one bot joins per second.
  */
 function maintainBotPopulation(now) {
+  // Checked every tick so a cohort rotation renames live bots promptly.
+  getBotNamePool();
+
   const players = Object.values(gameState.players);
   const humans = players.filter((p) => !p.isBot);
   const bots = players.filter((p) => p.isBot);
@@ -609,20 +694,24 @@ function botThink(bot, now) {
     }
   }
 
-  // 2. Threat evasion.
-  if (threat) {
+  // 2. Threat evasion. Only some of the time, and sloppily, so small bots
+  //    stay catchable.
+  if (threat && Math.random() < 0.55) {
     bot.desiredAngle =
-      Math.atan2(bot.y - threat.y, bot.x - threat.x) + (Math.random() - 0.5) * 0.7;
-    if (threatDist < 195 && bot.score > 18) bot.dashUntil = now + 450;
+      Math.atan2(bot.y - threat.y, bot.x - threat.x) + (Math.random() - 0.5) * 1.1;
+    if (threatDist < 135 && bot.score > 18 && Math.random() < 0.28) {
+      bot.dashUntil = now + 300;
+    }
     return;
   }
 
-  // 3. Prey hunt.
-  if (prey) {
+  // 3. Prey hunt. Big bots often ignore prey and keep grazing instead.
+  if (prey && Math.random() < 0.45) {
     const toPrey = Math.atan2(prey.y - bot.y, prey.x - bot.x);
+    const angleDiff = Math.abs(angleDelta(bot.angle, toPrey));
     bot.desiredAngle = toPrey;
-    if (preyDist < 175 && Math.abs(angleDelta(bot.angle, toPrey)) < 0.5 && bot.score > 35) {
-      bot.dashUntil = now + 500;
+    if (preyDist < 140 && angleDiff < 0.35 && bot.score > 45 && Math.random() < 0.22) {
+      bot.dashUntil = now + 350;
     }
     return;
   }
@@ -666,7 +755,7 @@ function updateBotAI(bot, dt, now) {
   const wobble = Math.sin(now * 0.0035 + bot.wanderPhase) * 0.07;
 
   if (now >= bot.nextThinkAt) {
-    bot.nextThinkAt = now + 180 + Math.random() * 220;
+    bot.nextThinkAt = now + 320 + Math.random() * 330;
     botThink(bot, now);
   }
 
@@ -718,6 +807,9 @@ io.on('connection', (socket) => {
 
     gameState.players[socket.id] = createPlayer(socket.id, name, color);
 
+    // The tick hibernates with no humans, so start the bots right away.
+    maintainBotPopulation(performance.now());
+
     console.log(
       `[game] ${name} joined as ${socket.id} (players: ${Object.keys(gameState.players).length})`,
     );
@@ -762,6 +854,16 @@ let lastTick = performance.now();
 
 setInterval(() => {
   const now = performance.now();
+
+  // Hibernate while no human is playing: bots freeze in place and no
+  // broadcasts go out. lastTick still advances, or the first tick after a
+  // human joins would apply the whole idle gap as one giant step.
+  const hasHumans = Object.values(gameState.players).some((p) => !p.isBot);
+  if (!hasHumans) {
+    lastTick = now;
+    return;
+  }
+
   const deltaTime = (now - lastTick) / 1000;
   lastTick = now;
 
