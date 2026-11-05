@@ -428,14 +428,17 @@ function killPlayer(id, { cause, eatenBy = null, eatenByName = null }) {
   );
 }
 
-/** The arena edge is lethal: any contact at all kills. */
+/**
+ * The arena edge is lethal, but only once the shark's centre of gravity
+ * crosses it. Fins, tail and snout tip may overhang the red line. The CoG sits
+ * slightly forward of the body centre, at 0.08 radii along the heading.
+ */
 function touchesWall(player) {
-  return (
-    player.x - player.radius <= 0 ||
-    player.y - player.radius <= 0 ||
-    player.x + player.radius >= WORLD.width ||
-    player.y + player.radius >= WORLD.height
-  );
+  const cogOffset = player.radius * 0.08;
+  const cogX = player.x + Math.cos(player.angle) * cogOffset;
+  const cogY = player.y + Math.sin(player.angle) * cogOffset;
+  const hitWall = cogX <= 0 || cogX >= WORLD.width || cogY <= 0 || cogY >= WORLD.height;
+  return hitWall;
 }
 
 /** The predator gains nothing directly: the prey bursts into fish it must eat. */
